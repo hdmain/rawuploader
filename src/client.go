@@ -184,10 +184,21 @@ func runClientGet(addr, code, outputPath string) error {
 		return fmt.Errorf("server error (status %d)", status)
 	}
 
-	name, plaintextChecksum, nonce, sealed, err := ReadEncryptedBlob(br)
+	start := time.Now()
+	progress := func(downloaded, total int64) {
+		elapsed := time.Since(start).Seconds()
+		if elapsed < 0.001 {
+			return
+		}
+		speed := float64(downloaded) / elapsed
+		remaining := total - downloaded
+		fmt.Printf("\r  speed: %s/s  |  downloaded: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(downloaded)), formatBytes(float64(remaining)))
+	}
+	name, plaintextChecksum, nonce, sealed, err := ReadEncryptedBlob(br, progress)
 	if err != nil {
 		return fmt.Errorf("read encrypted blob: %w", err)
 	}
+	fmt.Println()
 
 	fmt.Println("info: decrypting with your code...")
 	plaintext, err := decryptWithCode(code, nonce, sealed)

@@ -1,6 +1,6 @@
 # tcpraw
 
-## Polski
+## 🇵🇱Polski
 
 Przesyłanie plików przez TCP z 6-cyfrowymi kodami. Kod generuje klient i szyfruje plik; serwer przechowuje dane w postaci zaszyfrowanej. Bez rejestracji.
 
@@ -99,7 +99,7 @@ Możesz używać i modyfikować dowolnie.
 
 ---
 
-## English
+## 🇺🇸English
 
 TCP file send/receive with 6-digit codes. The client generates the code and encrypts the file; the server stores data encrypted. No account needed.
 

@@ -299,7 +299,7 @@ func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonc
 	return nil
 }
 
-func ReadEncryptedBlob(r io.Reader) (name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {
+func ReadEncryptedBlob(r io.Reader, progress ProgressFunc) (name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {
 	var nameLen uint16
 	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
 		return "", nil, nil, nil, err
@@ -321,9 +321,23 @@ func ReadEncryptedBlob(r io.Reader) (name string, plaintextChecksum []byte, nonc
 	if err = binary.Read(r, binary.BigEndian, &sealedLen); err != nil {
 		return "", nil, nil, nil, err
 	}
-	sealed = make([]byte, sealedLen)
-	if _, err = io.ReadFull(r, sealed); err != nil {
-		return "", nil, nil, nil, err
+	sealed = make([]byte, 0, sealedLen)
+	total := int64(sealedLen)
+	var read int64
+	for read < total {
+		n := sendChunkSize
+		if total-read < int64(n) {
+			n = int(total - read)
+		}
+		chunk := make([]byte, n)
+		if _, err = io.ReadFull(r, chunk); err != nil {
+			return "", nil, nil, nil, err
+		}
+		sealed = append(sealed, chunk...)
+		read += int64(n)
+		if progress != nil {
+			progress(read, total)
+		}
 	}
 	return name, plaintextChecksum, nonce, sealed, nil
 }

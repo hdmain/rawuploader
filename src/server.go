@@ -19,6 +19,7 @@ type StoredBlob struct {
 	PlaintextChecksum []byte
 	Nonce             []byte
 	Sealed            []byte
+	Chunks            []EncryptedChunk
 	CreatedAt         time.Time
 }
 
@@ -290,7 +291,7 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter) {
 }
 
 func handleUpload(conn net.Conn, r io.Reader, st *store) {
-	code, name, plaintextChecksum, nonce, sealed, err := ReadEncryptedUpload(r, MaxBlobSize)
+	code, name, plaintextChecksum, chunks, err := ReadEncryptedUploadChunked(r, MaxBlobSize)
 	if err != nil {
 		if err == ErrBlobTooLarge {
 			fmt.Fprintf(os.Stderr, "upload rejected: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
@@ -311,8 +312,7 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 	blob := &StoredBlob{
 		Name:              baseName,
 		PlaintextChecksum: plaintextChecksum,
-		Nonce:             nonce,
-		Sealed:            sealed,
+		Chunks:            chunks,
 		CreatedAt:         time.Now(),
 	}
 	if err := st.put(code, blob); err != nil {
@@ -354,9 +354,22 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		return
 	}
 	bw := bufio.NewWriterSize(conn, bufSize)
-	if err := WriteEncryptedBlob(bw, blob.Name, blob.PlaintextChecksum, blob.Nonce, blob.Sealed); err != nil {
-		fmt.Fprintf(os.Stderr, "send: %v\n", err)
-		return
+	if blob.Chunks != nil {
+		if _, err := bw.Write([]byte{1}); err != nil {
+			return
+		}
+		if err := WriteEncryptedBlobChunked(bw, blob.Name, blob.PlaintextChecksum, blob.Chunks); err != nil {
+			fmt.Fprintf(os.Stderr, "send: %v\n", err)
+			return
+		}
+	} else {
+		if _, err := bw.Write([]byte{0}); err != nil {
+			return
+		}
+		if err := WriteEncryptedBlob(bw, blob.Name, blob.PlaintextChecksum, blob.Nonce, blob.Sealed); err != nil {
+			fmt.Fprintf(os.Stderr, "send: %v\n", err)
+			return
+		}
 	}
 	if err := bw.Flush(); err != nil {
 		return
@@ -425,10 +438,23 @@ func runWebServer(port string, st *store, rl *rateLimiter) {
 			http.Redirect(w, r, "/?err=Code+expired", http.StatusFound)
 			return
 		}
-		plaintext, err := decryptWithCode(code, blob.Nonce, blob.Sealed)
-		if err != nil {
-			http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
-			return
+		var plaintext []byte
+		if blob.Chunks != nil {
+			for _, c := range blob.Chunks {
+				pt, err := decryptChunk(code, c.Nonce[:], c.Sealed)
+				if err != nil {
+					http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
+					return
+				}
+				plaintext = append(plaintext, pt...)
+			}
+		} else {
+			var err error
+			plaintext, err = decryptWithCode(code, blob.Nonce, blob.Sealed)
+			if err != nil {
+				http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
+				return
+			}
 		}
 		safeName := blob.Name
 		if safeName == "" || strings.Contains(safeName, "..") || strings.Contains(safeName, "/") {

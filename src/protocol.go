@@ -26,6 +26,13 @@ const (
 
 const CodeLength = 6
 
+const FileChunkSize = 256 * 1024
+
+type EncryptedChunk struct {
+	Nonce  [12]byte
+	Sealed []byte
+}
+
 type ProgressFunc func(sent, total int64)
 
 const sendChunkSize = 256 * 1024
@@ -265,6 +272,111 @@ func ReadEncryptedUpload(r io.Reader, maxSealed int64) (code string, name string
 	return code, name, plaintextChecksum, nonce, sealed, nil
 }
 
+func WriteEncryptedUploadChunked(w io.Writer, code string, name string, totalPlainLen int64, numChunks uint32, plaintextChecksum []byte, getChunk func() ([]byte, error), progress ProgressFunc) error {
+	if len(code) != CodeLength || len(plaintextChecksum) != sha256.Size {
+		return nil
+	}
+	if _, err := w.Write([]byte(code)); err != nil {
+		return err
+	}
+	nameBytes := []byte(name)
+	if len(nameBytes) > 0xFFFF {
+		nameBytes = nameBytes[:0xFFFF]
+	}
+	if err := binary.Write(w, binary.BigEndian, uint16(len(nameBytes))); err != nil {
+		return err
+	}
+	if _, err := w.Write(nameBytes); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint64(totalPlainLen)); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, numChunks); err != nil {
+		return err
+	}
+	if _, err := w.Write(plaintextChecksum); err != nil {
+		return err
+	}
+	var sent int64
+	for {
+		chunk, err := getChunk()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		nonce, sealed, encErr := encryptChunk(code, chunk)
+		if encErr != nil {
+			return encErr
+		}
+		if _, err := w.Write(nonce); err != nil {
+			return err
+		}
+		if err := binary.Write(w, binary.BigEndian, uint32(len(sealed))); err != nil {
+			return err
+		}
+		if _, err := w.Write(sealed); err != nil {
+			return err
+		}
+		sent += int64(len(chunk))
+		if progress != nil {
+			progress(sent, totalPlainLen)
+		}
+	}
+	return nil
+}
+
+func ReadEncryptedUploadChunked(r io.Reader, maxTotalPlain int64) (code string, name string, plaintextChecksum []byte, chunks []EncryptedChunk, err error) {
+	codeBuf := make([]byte, CodeLength)
+	if _, err = io.ReadFull(r, codeBuf); err != nil {
+		return "", "", nil, nil, err
+	}
+	code = string(codeBuf)
+	var nameLen uint16
+	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
+		return "", "", nil, nil, err
+	}
+	nameBuf := make([]byte, nameLen)
+	if _, err = io.ReadFull(r, nameBuf); err != nil {
+		return "", "", nil, nil, err
+	}
+	name = string(nameBuf)
+	var totalPlainLen uint64
+	if err = binary.Read(r, binary.BigEndian, &totalPlainLen); err != nil {
+		return "", "", nil, nil, err
+	}
+	if maxTotalPlain > 0 && int64(totalPlainLen) > maxTotalPlain {
+		return "", "", nil, nil, ErrBlobTooLarge
+	}
+	var numChunks uint32
+	if err = binary.Read(r, binary.BigEndian, &numChunks); err != nil {
+		return "", "", nil, nil, err
+	}
+	plaintextChecksum = make([]byte, sha256.Size)
+	if _, err = io.ReadFull(r, plaintextChecksum); err != nil {
+		return "", "", nil, nil, err
+	}
+	chunks = make([]EncryptedChunk, 0, numChunks)
+	for i := uint32(0); i < numChunks; i++ {
+		var c EncryptedChunk
+		if _, err = io.ReadFull(r, c.Nonce[:]); err != nil {
+			return "", "", nil, nil, err
+		}
+		var sealedLen uint32
+		if err = binary.Read(r, binary.BigEndian, &sealedLen); err != nil {
+			return "", "", nil, nil, err
+		}
+		c.Sealed = make([]byte, sealedLen)
+		if _, err = io.ReadFull(r, c.Sealed); err != nil {
+			return "", "", nil, nil, err
+		}
+		chunks = append(chunks, c)
+	}
+	return code, name, plaintextChecksum, chunks, nil
+}
+
 func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonce, sealed []byte) error {
 	nameBytes := []byte(name)
 	if len(nameBytes) > 0xFFFF {
@@ -297,6 +409,85 @@ func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonc
 		sent += n
 	}
 	return nil
+}
+
+func WriteEncryptedBlobChunked(w io.Writer, name string, plaintextChecksum []byte, chunks []EncryptedChunk) error {
+	nameBytes := []byte(name)
+	if len(nameBytes) > 0xFFFF {
+		nameBytes = nameBytes[:0xFFFF]
+	}
+	if err := binary.Write(w, binary.BigEndian, uint16(len(nameBytes))); err != nil {
+		return err
+	}
+	if _, err := w.Write(nameBytes); err != nil {
+		return err
+	}
+	var totalPlainLen uint64
+	for _, c := range chunks {
+		if len(c.Sealed) >= 16 {
+			totalPlainLen += uint64(len(c.Sealed) - 16)
+		}
+	}
+	if err := binary.Write(w, binary.BigEndian, totalPlainLen); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(chunks))); err != nil {
+		return err
+	}
+	if _, err := w.Write(plaintextChecksum); err != nil {
+		return err
+	}
+	for _, c := range chunks {
+		if _, err := w.Write(c.Nonce[:]); err != nil {
+			return err
+		}
+		if err := binary.Write(w, binary.BigEndian, uint32(len(c.Sealed))); err != nil {
+			return err
+		}
+		if _, err := w.Write(c.Sealed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ReadEncryptedBlobChunkedHeader(r io.Reader) (name string, totalPlainLen uint64, numChunks uint32, plaintextChecksum []byte, err error) {
+	var nameLen uint16
+	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
+		return "", 0, 0, nil, err
+	}
+	nameBuf := make([]byte, nameLen)
+	if _, err = io.ReadFull(r, nameBuf); err != nil {
+		return "", 0, 0, nil, err
+	}
+	name = string(nameBuf)
+	if err = binary.Read(r, binary.BigEndian, &totalPlainLen); err != nil {
+		return "", 0, 0, nil, err
+	}
+	if err = binary.Read(r, binary.BigEndian, &numChunks); err != nil {
+		return "", 0, 0, nil, err
+	}
+	plaintextChecksum = make([]byte, sha256.Size)
+	if _, err = io.ReadFull(r, plaintextChecksum); err != nil {
+		return "", 0, 0, nil, err
+	}
+	return name, totalPlainLen, numChunks, plaintextChecksum, nil
+}
+
+func ReadEncryptedBlobNextChunk(r io.Reader, code string) (plaintext []byte, err error) {
+	var nonce [12]byte
+	if _, err = io.ReadFull(r, nonce[:]); err != nil {
+		return nil, err
+	}
+	var sealedLen uint32
+	if err = binary.Read(r, binary.BigEndian, &sealedLen); err != nil {
+		return nil, err
+	}
+	sealed := make([]byte, sealedLen)
+	if _, err = io.ReadFull(r, sealed); err != nil {
+		return nil, err
+	}
+	return decryptChunk(code, nonce[:], sealed)
 }
 
 func ReadEncryptedBlob(r io.Reader, progress ProgressFunc) (name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {

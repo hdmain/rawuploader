@@ -11,7 +11,7 @@ var (
 	DefaultServerAddr = "94.249.197.155:9999"
 	StorageDuration   = 30 * time.Minute
 	CleanupInterval   = 5 * time.Minute
-	MaxBlobSize       = int64(4 * 1024 * 1024 * 1024) // 2 GB per upload
+	MaxBlobSize       = int64(15 * 1024 * 1024 * 1024) // 15 GB per upload
 	RateLimitAttempts = 50
 	RateLimitWindow   = 10 * time.Minute
 	BanDuration       = 15 * time.Minute

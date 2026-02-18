@@ -57,3 +57,11 @@ func decryptWithCode(code string, nonce, sealed []byte) (plaintext []byte, err e
 	}
 	return plaintext, nil
 }
+
+func encryptChunk(code string, plaintext []byte) (nonce, sealed []byte, err error) {
+	return encryptWithCode(code, plaintext)
+}
+
+func decryptChunk(code string, nonce, sealed []byte) (plaintext []byte, err error) {
+	return decryptWithCode(code, nonce, sealed)
+}

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"crypto/sha256"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +22,9 @@ type StoredBlob struct {
 	Nonce             []byte
 	Sealed            []byte
 	Chunks            []EncryptedChunk
+	TotalPlainLen     uint64
+	NumChunks         uint32
+	Chunked           bool
 	CreatedAt         time.Time
 }
 
@@ -52,6 +57,10 @@ func (s *store) blobPath(code string) string {
 	return filepath.Join(s.dataDir, code+".blob")
 }
 
+func (s *store) dataPath(code string) string {
+	return filepath.Join(s.dataDir, code+".dat")
+}
+
 func (s *store) indexPath() string {
 	return filepath.Join(s.dataDir, indexFilename)
 }
@@ -78,7 +87,7 @@ func (s *store) removeOrphanBlobs() error {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasSuffix(name, ".blob") || len(name) != CodeLength+5 {
+		if (!strings.HasSuffix(name, ".blob") && !strings.HasSuffix(name, ".dat")) || len(name) != CodeLength+5 {
 			continue
 		}
 		code := name[:CodeLength]
@@ -150,8 +159,10 @@ func (s *store) get(code string) (*StoredBlob, bool) {
 }
 
 func (s *store) remove(code string) {
-	path := s.blobPath(code)
-	os.Remove(path)
+	metaPath := s.blobPath(code)
+	dataPath := s.dataPath(code)
+	_ = os.Remove(metaPath)
+	_ = os.Remove(dataPath)
 	s.mu.Lock()
 	delete(s.index, code)
 	s.saveIndex()
@@ -291,13 +302,53 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter) {
 }
 
 func handleUpload(conn net.Conn, r io.Reader, st *store) {
-	code, name, plaintextChecksum, chunks, err := ReadEncryptedUploadChunked(r, MaxBlobSize)
-	if err != nil {
-		if err == ErrBlobTooLarge {
-			fmt.Fprintf(os.Stderr, "upload rejected: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
-		} else if err != io.EOF {
-			fmt.Fprintf(os.Stderr, "read encrypted upload: %v\n", err)
+	// Strumieniowe wczytywanie nagłówka uploadu (chunked) i zapisywanie zaszyfrowanych chunków prosto na dysk.
+	codeBuf := make([]byte, CodeLength)
+	if _, err := io.ReadFull(r, codeBuf); err != nil {
+		if err != io.EOF {
+			fmt.Fprintf(os.Stderr, "read code: %v\n", err)
 		}
+		SendStatus(conn, StatusError)
+		return
+	}
+	code := string(codeBuf)
+
+	var nameLen uint16
+	if err := binary.Read(r, binary.BigEndian, &nameLen); err != nil {
+		fmt.Fprintf(os.Stderr, "read name len: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	nameBuf := make([]byte, nameLen)
+	if _, err := io.ReadFull(r, nameBuf); err != nil {
+		fmt.Fprintf(os.Stderr, "read name: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	name := string(nameBuf)
+
+	var totalPlainLen uint64
+	if err := binary.Read(r, binary.BigEndian, &totalPlainLen); err != nil {
+		fmt.Fprintf(os.Stderr, "read totalPlainLen: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	if MaxBlobSize > 0 && int64(totalPlainLen) > MaxBlobSize {
+		fmt.Fprintf(os.Stderr, "upload rejected: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+		SendStatus(conn, StatusError)
+		return
+	}
+
+	var numChunks uint32
+	if err := binary.Read(r, binary.BigEndian, &numChunks); err != nil {
+		fmt.Fprintf(os.Stderr, "read numChunks: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+
+	plaintextChecksum := make([]byte, sha256.Size)
+	if _, err := io.ReadFull(r, plaintextChecksum); err != nil {
+		fmt.Fprintf(os.Stderr, "read checksum: %v\n", err)
 		SendStatus(conn, StatusError)
 		return
 	}
@@ -309,10 +360,93 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 	}
 
 	fmt.Println("info: receiving encrypted file", baseName)
+
+	dataPath := st.dataPath(code)
+	df, err := os.Create(dataPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create data file: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	var plainCount uint64
+	for i := uint32(0); i < numChunks; i++ {
+		// nonce (12)
+		var header [16]byte
+		if _, err := io.ReadFull(r, header[:12]); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "read nonce: %v\n", err)
+			SendStatus(conn, StatusError)
+			return
+		}
+		// sealedLen (4)
+		if _, err := io.ReadFull(r, header[12:16]); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "read sealedLen: %v\n", err)
+			SendStatus(conn, StatusError)
+			return
+		}
+		sealedLen := binary.BigEndian.Uint32(header[12:16])
+		if sealedLen < 16 {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "invalid sealedLen: %d\n", sealedLen)
+			SendStatus(conn, StatusError)
+			return
+		}
+		plainCount += uint64(sealedLen - 16)
+		if MaxBlobSize > 0 && int64(plainCount) > MaxBlobSize {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "upload rejected mid-stream: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+			SendStatus(conn, StatusError)
+			return
+		}
+		// Zapisz header do pliku
+		if _, err := df.Write(header[:16]); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "write header to data file: %v\n", err)
+			SendStatus(conn, StatusError)
+			return
+		}
+		// Zapisz zaszyfrowany chunk
+		sealed := make([]byte, sealedLen)
+		if _, err := io.ReadFull(r, sealed); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "read sealed chunk: %v\n", err)
+			SendStatus(conn, StatusError)
+			return
+		}
+		if _, err := df.Write(sealed); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "write sealed chunk: %v\n", err)
+			SendStatus(conn, StatusError)
+			return
+		}
+	}
+	if err := df.Close(); err != nil {
+		os.Remove(dataPath)
+		fmt.Fprintf(os.Stderr, "close data file: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	if plainCount != totalPlainLen {
+		os.Remove(dataPath)
+		fmt.Fprintf(os.Stderr, "mismatched plaintext length: header=%d, counted=%d\n", totalPlainLen, plainCount)
+		SendStatus(conn, StatusError)
+		return
+	}
+
 	blob := &StoredBlob{
 		Name:              baseName,
 		PlaintextChecksum: plaintextChecksum,
-		Chunks:            chunks,
+		TotalPlainLen:     totalPlainLen,
+		NumChunks:         numChunks,
+		Chunked:           true,
 		CreatedAt:         time.Now(),
 	}
 	if err := st.put(code, blob); err != nil {
@@ -354,7 +488,15 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		return
 	}
 	bw := bufio.NewWriterSize(conn, bufSize)
-	if blob.Chunks != nil {
+	if blob.Chunked {
+		if _, err := bw.Write([]byte{1}); err != nil {
+			return
+		}
+		if err := sendChunkedFromFile(bw, st.dataPath(code), blob); err != nil {
+			fmt.Fprintf(os.Stderr, "send (stream): %v\n", err)
+			return
+		}
+	} else if blob.Chunks != nil {
 		if _, err := bw.Write([]byte{1}); err != nil {
 			return
 		}
@@ -438,6 +580,46 @@ func runWebServer(port string, st *store, rl *rateLimiter) {
 			http.Redirect(w, r, "/?err=Code+expired", http.StatusFound)
 			return
 		}
+		safeName := blob.Name
+		if safeName == "" || strings.Contains(safeName, "..") || strings.Contains(safeName, "/") {
+			safeName = "download"
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+strings.ReplaceAll(safeName, "\"", "")+"\"")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		if blob.Chunked {
+			df, err := os.Open(st.dataPath(code))
+			if err != nil {
+				http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
+				return
+			}
+			defer df.Close()
+			for i := uint32(0); i < blob.NumChunks; i++ {
+				var nonce [12]byte
+				if _, err := io.ReadFull(df, nonce[:]); err != nil {
+					http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
+					return
+				}
+				var sealedLen uint32
+				if err := binary.Read(df, binary.BigEndian, &sealedLen); err != nil {
+					http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
+					return
+				}
+				sealed := make([]byte, sealedLen)
+				if _, err := io.ReadFull(df, sealed); err != nil {
+					http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
+					return
+				}
+				pt, err := decryptChunk(code, nonce[:], sealed)
+				if err != nil {
+					http.Redirect(w, r, "/?err=Decrypt+failed", http.StatusFound)
+					return
+				}
+				if _, err := w.Write(pt); err != nil {
+					return
+				}
+			}
+			return
+		}
 		var plaintext []byte
 		if blob.Chunks != nil {
 			for _, c := range blob.Chunks {
@@ -456,12 +638,6 @@ func runWebServer(port string, st *store, rl *rateLimiter) {
 				return
 			}
 		}
-		safeName := blob.Name
-		if safeName == "" || strings.Contains(safeName, "..") || strings.Contains(safeName, "/") {
-			safeName = "download"
-		}
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+strings.ReplaceAll(safeName, "\"", "")+"\"")
-		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Write(plaintext)
 	})
 	addr := ":" + port

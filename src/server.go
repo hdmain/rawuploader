@@ -2,10 +2,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
-	"crypto/sha256"
 	"io"
 	"net"
 	"net/http"
@@ -25,6 +25,7 @@ type StoredBlob struct {
 	TotalPlainLen     uint64
 	NumChunks         uint32
 	Chunked           bool
+	Secure            bool
 	CreatedAt         time.Time
 }
 
@@ -295,6 +296,8 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter) {
 		handleUpload(conn, r, st)
 	case MsgDownload:
 		handleDownload(conn, r, st, rl)
+	case MsgSecureUpload:
+		handleSecureUpload(conn, r, st)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown type: %c\n", msgType)
 		SendStatus(conn, StatusError)
@@ -458,6 +461,42 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 	SendStatus(conn, StatusOK)
 }
 
+func handleSecureUpload(conn net.Conn, r io.Reader, st *store) {
+	name, plaintextChecksum, nonce, sealed, err := ReadSecureUpload(r, MaxBlobSize)
+	if err != nil {
+		if err == ErrBlobTooLarge {
+			fmt.Fprintf(os.Stderr, "secure upload rejected: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+		} else if err != io.EOF {
+			fmt.Fprintf(os.Stderr, "read secure upload: %v\n", err)
+		}
+		SendStatus(conn, StatusError)
+		return
+	}
+	baseName := filepath.Base(name)
+	if baseName == "" || strings.Contains(baseName, "..") {
+		SendStatus(conn, StatusError)
+		return
+	}
+	code := generateCode()
+	blob := &StoredBlob{
+		Name:              baseName,
+		PlaintextChecksum: plaintextChecksum,
+		Nonce:             nonce,
+		Sealed:            sealed,
+		Secure:            true,
+		CreatedAt:         time.Now(),
+	}
+	if err := st.put(code, blob); err != nil {
+		fmt.Fprintf(os.Stderr, "save secure blob: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	fmt.Printf("Secure upload: %s (code %s)\n", baseName, code)
+	if err := SendCodeResponse(conn, StatusOK, code); err != nil {
+		return
+	}
+}
+
 func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 	ip := extractIP(conn.RemoteAddr().String())
 	if !rl.allow(ip) {
@@ -488,7 +527,15 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		return
 	}
 	bw := bufio.NewWriterSize(conn, bufSize)
-	if blob.Chunked {
+	if blob.Secure {
+		if _, err := bw.Write([]byte{2}); err != nil {
+			return
+		}
+		if err := WriteEncryptedBlob(bw, blob.Name, blob.PlaintextChecksum, blob.Nonce, blob.Sealed); err != nil {
+			fmt.Fprintf(os.Stderr, "send secure: %v\n", err)
+			return
+		}
+	} else if blob.Chunked {
 		if _, err := bw.Write([]byte{1}); err != nil {
 			return
 		}
@@ -578,6 +625,10 @@ func runWebServer(port string, st *store, rl *rateLimiter) {
 		if time.Since(blob.CreatedAt) > StorageDuration {
 			st.remove(code)
 			http.Redirect(w, r, "/?err=Code+expired", http.StatusFound)
+			return
+		}
+		if blob.Secure {
+			http.Redirect(w, r, "/?err=Secure+upload.+Use+tcpraw+get+with+your+key+to+download.", http.StatusFound)
 			return
 		}
 		safeName := blob.Name

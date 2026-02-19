@@ -70,6 +70,28 @@ func main() {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
+	case "secure":
+		if len(os.Args) < 3 {
+			printUsage()
+			os.Exit(1)
+		}
+		if os.Args[2] != "send" {
+			printUsage()
+			os.Exit(1)
+		}
+		args := os.Args[3:]
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file> [host:port]")
+			os.Exit(1)
+		}
+		addr := DefaultServerAddr
+		if len(args) >= 2 {
+			addr = args[1]
+		}
+		if err := runClientSecureSend(addr, args[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "client: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -81,12 +103,14 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("  server – listen for uploads; store encrypted data")
 	fmt.Println("  send   – generate code, encrypt file, upload; you get the 6-digit code")
-	fmt.Println("  get    – download by code; decrypt with same code")
+	fmt.Println("  get    – download by code; decrypt with same code (or with key for secure uploads)")
+	fmt.Println("  secure send – encrypt with your own 256-bit key; server assigns code; use get + key to download")
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  tcpraw server [-port=9999] [-dir=./data] [-web=8080]")
 	fmt.Println("    -web=PORT  serve download page in browser (no client needed)")
 	fmt.Println("  tcpraw send <file> [host:port]")
+	fmt.Println("  tcpraw secure send <file> [host:port]")
 	fmt.Println("  tcpraw get <6-digit-code> [host:port] [-o file]")
 	fmt.Println()
 	fmt.Printf("Default host:port is %s (change DefaultServerAddr in main.go)\n", DefaultServerAddr)

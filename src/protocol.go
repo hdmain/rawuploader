@@ -13,8 +13,9 @@ var ErrBlobTooLarge = errors.New("blob too large")
 const nonceSize = 12
 
 const (
-	MsgUpload   = 'U'
-	MsgDownload = 'D'
+	MsgUpload        = 'U'
+	MsgDownload      = 'D'
+	MsgSecureUpload  = 'S'
 )
 
 const (
@@ -233,6 +234,39 @@ func WriteEncryptedUpload(w io.Writer, code string, name string, plaintextChecks
 		}
 	}
 	return nil
+}
+
+// ReadSecureUpload odczytuje body secure uploadu (bez kodu): name, checksum, nonce, sealed. Limit: maxSealed.
+func ReadSecureUpload(r io.Reader, maxSealed int64) (name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {
+	var nameLen uint16
+	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
+		return "", nil, nil, nil, err
+	}
+	nameBuf := make([]byte, nameLen)
+	if _, err = io.ReadFull(r, nameBuf); err != nil {
+		return "", nil, nil, nil, err
+	}
+	name = string(nameBuf)
+	plaintextChecksum = make([]byte, sha256.Size)
+	if _, err = io.ReadFull(r, plaintextChecksum); err != nil {
+		return "", nil, nil, nil, err
+	}
+	nonce = make([]byte, nonceSize)
+	if _, err = io.ReadFull(r, nonce); err != nil {
+		return "", nil, nil, nil, err
+	}
+	var sealedLen uint64
+	if err = binary.Read(r, binary.BigEndian, &sealedLen); err != nil {
+		return "", nil, nil, nil, err
+	}
+	if maxSealed > 0 && sealedLen > uint64(maxSealed) {
+		return "", nil, nil, nil, ErrBlobTooLarge
+	}
+	sealed = make([]byte, sealedLen)
+	if _, err = io.ReadFull(r, sealed); err != nil {
+		return "", nil, nil, nil, err
+	}
+	return name, plaintextChecksum, nonce, sealed, nil
 }
 
 func ReadEncryptedUpload(r io.Reader, maxSealed int64) (code string, name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {

@@ -65,3 +65,47 @@ func encryptChunk(code string, plaintext []byte) (nonce, sealed []byte, err erro
 func decryptChunk(code string, nonce, sealed []byte) (plaintext []byte, err error) {
 	return decryptWithCode(code, nonce, sealed)
 }
+
+const SecureKeySize = 32
+
+func encryptWithKey(key []byte, plaintext []byte) (nonce, sealed []byte, err error) {
+	if len(key) != SecureKeySize {
+		return nil, nil, errors.New("key must be 32 bytes")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce = make([]byte, gcmNonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, nil, err
+	}
+	sealed = gcm.Seal(nil, nonce, plaintext, nil)
+	return nonce, sealed, nil
+}
+
+func decryptWithKey(key, nonce, sealed []byte) (plaintext []byte, err error) {
+	if len(key) != SecureKeySize {
+		return nil, errors.New("key must be 32 bytes")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != gcmNonceSize {
+		return nil, errors.New("invalid nonce size")
+	}
+	plaintext, err = gcm.Open(nil, nonce, sealed, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plaintext, nil
+}

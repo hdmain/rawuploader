@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	crand "crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math/rand"
@@ -171,6 +173,58 @@ func runClientSend(addr, filePath string) error {
 	}
 }
 
+func runClientSecureSend(addr, filePath string) error {
+	plaintext, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+	if len(plaintext) == 0 {
+		return fmt.Errorf("file is empty")
+	}
+	key := make([]byte, SecureKeySize)
+	if _, err := io.ReadFull(crand.Reader, key); err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+	plaintextChecksum := sha256.Sum256(plaintext)
+	nonce, sealed, err := encryptWithKey(key, plaintext)
+	if err != nil {
+		return fmt.Errorf("encrypt: %w", err)
+	}
+
+	conn, err := dialWithFallback(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	bw := bufio.NewWriterSize(conn, bufSize)
+	if err := WriteMessageType(bw, MsgSecureUpload); err != nil {
+		return err
+	}
+	baseName := filepath.Base(filePath)
+	if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed); err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+
+	fmt.Println("info: waiting for server...")
+	status, code, err := ReadCodeResponse(conn)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if status != StatusOK {
+		return fmt.Errorf("server error")
+	}
+
+	fmt.Println()
+	fmt.Printf("Code: %s (valid 1 hour)\n", code)
+	fmt.Printf("Key (save it – needed to download): %s\n", hex.EncodeToString(key))
+	fmt.Println("Without the key the file cannot be decrypted.")
+	return nil
+}
+
 func runClientGet(addr, code, outputPath string) error {
 	if len(code) != CodeLength {
 		return fmt.Errorf("code must be 6 digits")
@@ -237,6 +291,47 @@ func runClientGet(addr, code, outputPath string) error {
 		actualChecksum := sha256.Sum256(plaintext)
 		if !checksumEqual(actualChecksum[:], plaintextChecksum) {
 			return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
+		}
+		savePath := outputPath
+		if savePath == "" {
+			savePath = filepath.Base(name)
+		}
+		if savePath == "" {
+			savePath = "downloaded_file"
+		}
+		if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
+			return fmt.Errorf("write file %s: %w", savePath, err)
+		}
+		fmt.Printf("Downloaded: %s\n", savePath)
+		return nil
+	}
+
+	if formatByte[0] == 2 {
+		name, plaintextChecksum, nonce, sealed, err := ReadEncryptedBlob(br, progress)
+		if err != nil {
+			return fmt.Errorf("read encrypted blob: %w", err)
+		}
+		fmt.Println()
+		fmt.Print("Enter key (64 hex characters): ")
+		var keyHex string
+		if _, err := fmt.Scanln(&keyHex); err != nil {
+			return fmt.Errorf("read key: %w", err)
+		}
+		keyHex = strings.TrimSpace(keyHex)
+		if len(keyHex) != 64 {
+			return fmt.Errorf("key must be 64 hex characters (32 bytes)")
+		}
+		key, err := hex.DecodeString(keyHex)
+		if err != nil {
+			return fmt.Errorf("invalid hex key: %w", err)
+		}
+		plaintext, err := decryptWithKey(key, nonce, sealed)
+		if err != nil {
+			return fmt.Errorf("decrypt: %w", err)
+		}
+		sum := sha256.Sum256(plaintext)
+		if !checksumEqual(sum[:], plaintextChecksum) {
+			return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
 		}
 		savePath := outputPath
 		if savePath == "" {

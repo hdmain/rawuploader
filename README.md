@@ -23,10 +23,12 @@ Przesyłanie plików przez TCP z 6-cyfrowymi kodami. Kod generuje klient i szyfr
 curl -sSL https://raw.githubusercontent.com/hdmain/rawuploader/main/install.sh | bash
 ```
 
-### Kompilacja
+### Instalacja (Windows)
 
-```bash
-go build -o tcpraw .
+W PowerShell (jako administrator):
+
+```powershell
+irm https://raw.githubusercontent.com/hdmain/rawuploader/main/install-win.ps1 | iex
 ```
 
 ### Konfiguracja (main.go)
@@ -122,10 +124,12 @@ TCP file send/receive with 6-digit codes. The client generates the code and encr
 curl -sSL https://raw.githubusercontent.com/hdmain/rawuploader/main/install.sh | bash
 ```
 
-### Build
+### Installation (Windows)
 
-```bash
-go build -o tcpraw .
+In PowerShell (run as Administrator):
+
+```powershell
+irm https://raw.githubusercontent.com/hdmain/rawuploader/main/install-win.ps1 | iex
 ```
 
 ### Configuration (main.go)

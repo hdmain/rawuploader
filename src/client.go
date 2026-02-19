@@ -202,12 +202,24 @@ func runClientSecureSend(addr, filePath string) error {
 		return err
 	}
 	baseName := filepath.Base(filePath)
-	if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed); err != nil {
+	start := time.Now()
+	progress := func(sent, total int64) {
+		elapsed := time.Since(start).Seconds()
+		if elapsed < 0.001 {
+			return
+		}
+		speed := float64(sent) / elapsed
+		remaining := total - sent
+		fmt.Printf("\r  speed: %s/s  |  sent: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(sent)), formatBytes(float64(remaining)))
+	}
+	fmt.Println("info: sending encrypted file...")
+	if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed, progress); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
 	if err := bw.Flush(); err != nil {
 		return fmt.Errorf("flush: %w", err)
 	}
+	fmt.Println()
 
 	fmt.Println("info: waiting for server...")
 	status, code, err := ReadCodeResponse(conn)

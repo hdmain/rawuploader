@@ -55,7 +55,22 @@ func main() {
 			os.Exit(1)
 		}
 	case "get":
-		_ = clientGetCmd.Parse(os.Args[2:])
+		// Wyciągamy -o/--output z dowolnej pozycji, bo flag.Parse() przestaje przy pierwszym nie-flagu
+		getArgs := os.Args[2:]
+		var getOutput string
+		var getPositional []string
+		for i := 0; i < len(getArgs); i++ {
+			switch getArgs[i] {
+			case "-o", "--output":
+				if i+1 < len(getArgs) {
+					getOutput = getArgs[i+1]
+					i++
+				}
+				continue
+			}
+			getPositional = append(getPositional, getArgs[i])
+		}
+		_ = clientGetCmd.Parse(getPositional)
 		args := clientGetCmd.Args()
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: tcpraw get <6-digit-code> [host:port] [-o file]")
@@ -66,7 +81,11 @@ func main() {
 			addr = args[1]
 		}
 		code := args[0]
-		if err := runClientGet(addr, code, *clientGetOut); err != nil {
+		outPath := getOutput
+		if outPath == "" {
+			outPath = *clientGetOut
+		}
+		if err := runClientGet(addr, code, outPath); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}

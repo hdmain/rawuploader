@@ -411,7 +411,7 @@ func ReadEncryptedUploadChunked(r io.Reader, maxTotalPlain int64) (code string, 
 	return code, name, plaintextChecksum, chunks, nil
 }
 
-func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonce, sealed []byte) error {
+func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonce, sealed []byte, progress ProgressFunc) error {
 	nameBytes := []byte(name)
 	if len(nameBytes) > 0xFFFF {
 		nameBytes = nameBytes[:0xFFFF]
@@ -431,16 +431,20 @@ func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonc
 	if err := binary.Write(w, binary.BigEndian, uint64(len(sealed))); err != nil {
 		return err
 	}
-	total := len(sealed)
-	for sent := 0; sent < total; {
+	total := int64(len(sealed))
+	var sent int64
+	for sent < total {
 		n := sendChunkSize
-		if total-sent < n {
-			n = total - sent
+		if total-sent < int64(n) {
+			n = int(total - sent)
 		}
-		if _, err := w.Write(sealed[sent : sent+n]); err != nil {
+		if _, err := w.Write(sealed[sent : sent+int64(n)]); err != nil {
 			return err
 		}
-		sent += n
+		sent += int64(n)
+		if progress != nil {
+			progress(sent, total)
+		}
 	}
 	return nil
 }

@@ -531,7 +531,7 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		if _, err := bw.Write([]byte{2}); err != nil {
 			return
 		}
-		if err := WriteEncryptedBlob(bw, blob.Name, blob.PlaintextChecksum, blob.Nonce, blob.Sealed); err != nil {
+		if err := WriteEncryptedBlob(bw, blob.Name, blob.PlaintextChecksum, blob.Nonce, blob.Sealed, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "send secure: %v\n", err)
 			return
 		}
@@ -555,7 +555,7 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		if _, err := bw.Write([]byte{0}); err != nil {
 			return
 		}
-		if err := WriteEncryptedBlob(bw, blob.Name, blob.PlaintextChecksum, blob.Nonce, blob.Sealed); err != nil {
+		if err := WriteEncryptedBlob(bw, blob.Name, blob.PlaintextChecksum, blob.Nonce, blob.Sealed, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "send: %v\n", err)
 			return
 		}

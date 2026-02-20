@@ -4,6 +4,7 @@ import (
 	"bufio"
 	crand "crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -13,14 +14,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	addressListURL = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
-	dialTimeout    = 30 * time.Second
-	bufSize        = 2 * 1024 * 1024 // 2 MB bufio for throughput
-	tcpBufferSize  = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
+	addressListURL   = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
+	dialTimeout      = 30 * time.Second
+	probeTimeout     = 1 * time.Second
+	probeDialTimeout = 500 * time.Millisecond
+	bufSize          = 2 * 1024 * 1024 // 2 MB bufio for throughput
+	tcpBufferSize    = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
 )
 
 // serverList: [id 0..9] = "host:port"
@@ -57,25 +61,105 @@ func fetchServerList() ([]string, error) {
 	return addrs, nil
 }
 
-func tryServersFromList() (net.Conn, int, error) {
+type probeResult struct {
+	serverID int
+	addr     string
+	speedBps float64
+	ok       bool
+}
+
+func probeServer(addr string, serverID int, fileSize uint64) (speedBps float64, ok bool) {
+	conn, err := net.DialTimeout("tcp", addr, probeDialTimeout)
+	if err != nil {
+		return 0, false
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(probeTimeout))
+
+	if err := WriteMessageType(conn, MsgTest); err != nil {
+		return 0, false
+	}
+	if err := WriteTestRequest(conn, fileSize); err != nil {
+		return 0, false
+	}
+
+	var free uint64
+	if err := binary.Read(conn, binary.BigEndian, &free); err != nil {
+		return 0, false
+	}
+	if free < fileSize {
+		return 0, false
+	}
+
+	var payloadLen uint32
+	if err := binary.Read(conn, binary.BigEndian, &payloadLen); err != nil {
+		return 0, false
+	}
+	if payloadLen == 0 || payloadLen > 4*1024*1024 {
+		return 0, false
+	}
+
+	start := time.Now()
+	n, err := io.CopyN(io.Discard, conn, int64(payloadLen))
+	if err != nil || n != int64(payloadLen) {
+		return 0, false
+	}
+	elapsed := time.Since(start).Seconds()
+	if elapsed < 0.0001 {
+		elapsed = 0.0001
+	}
+	return float64(payloadLen) / elapsed, true
+}
+
+func tryServersFromList(fileSize int64) (net.Conn, int, error) {
 	addrs, err := fetchServerList()
 	if err != nil {
 		return nil, 0, fmt.Errorf("fetch server list: %w", err)
 	}
-	var lastErr error
+
+	fileSizeU := uint64(fileSize)
+	if fileSizeU < 0 {
+		fileSizeU = 0
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan probeResult, 10)
 	for id, addr := range addrs {
 		if addr == "" {
 			continue
 		}
-		conn, err := net.DialTimeout("tcp", addr, dialTimeout)
-		if err != nil {
-			lastErr = err
+		wg.Add(1)
+		go func(serverID int, a string) {
+			defer wg.Done()
+			speed, ok := probeServer(a, serverID, fileSizeU)
+			results <- probeResult{serverID, a, speed, ok}
+		}(id, addr)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var best probeResult
+	for r := range results {
+		if !r.ok {
 			continue
 		}
-		setTCPBuffers(conn)
-		return conn, id, nil
+		if r.speedBps > best.speedBps {
+			best = r
+		}
 	}
-	return nil, 0, fmt.Errorf("no server available: %w", lastErr)
+
+	if !best.ok {
+		return nil, 0, fmt.Errorf("no server available (none had enough space or all probes failed)")
+	}
+
+	conn, err := net.DialTimeout("tcp", best.addr, dialTimeout)
+	if err != nil {
+		return nil, 0, err
+	}
+	setTCPBuffers(conn)
+	return conn, best.serverID, nil
 }
 
 func dialWithFallback(addr string) (net.Conn, error) {
@@ -167,8 +251,9 @@ func runClientSend(filePath string, addr string) error {
 		}
 		serverID = 0
 	} else {
+		fmt.Println("info: probing servers (disk space + bandwidth, max 1s)...")
 		var err error
-		conn, serverID, err = tryServersFromList()
+		conn, serverID, err = tryServersFromList(size)
 		if err != nil {
 			return err
 		}
@@ -254,7 +339,8 @@ func runClientSecureSend(filePath string, addr string) error {
 	if addr != "" {
 		conn, err = dialWithFallback(addr)
 	} else {
-		conn, _, err = tryServersFromList()
+		fmt.Println("info: probing servers (disk space + bandwidth, max 1s)...")
+		conn, _, err = tryServersFromList(int64(len(plaintext)))
 	}
 	if err != nil {
 		return err

@@ -13,10 +13,13 @@ var ErrBlobTooLarge = errors.New("blob too large")
 const nonceSize = 12
 
 const (
-	MsgUpload        = 'U'
-	MsgDownload      = 'D'
-	MsgSecureUpload  = 'S'
+	MsgUpload       = 'U'
+	MsgDownload     = 'D'
+	MsgSecureUpload = 'S'
+	MsgTest         = 'T'
 )
+
+const TestPayloadSize = 256 * 1024 // 256 KB for bandwidth probe
 
 const (
 	StatusOK            = 0
@@ -143,6 +146,15 @@ func ReadMessageType(r io.Reader) (byte, error) {
 		return 0, err
 	}
 	return b[0], nil
+}
+
+func WriteTestRequest(w io.Writer, fileSize uint64) error {
+	return binary.Write(w, binary.BigEndian, fileSize)
+}
+
+func ReadTestRequest(r io.Reader) (fileSize uint64, err error) {
+	err = binary.Read(r, binary.BigEndian, &fileSize)
+	return fileSize, err
 }
 
 func SendCodeResponse(w io.Writer, status byte, code string) error {

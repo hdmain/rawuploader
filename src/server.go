@@ -102,6 +102,10 @@ func (s *store) dataPath(code string) string {
 	return filepath.Join(s.dataDir, code+".dat")
 }
 
+func (s *store) DataDir() string {
+	return s.dataDir
+}
+
 func (s *store) indexPath() string {
 	return filepath.Join(s.dataDir, indexFilename)
 }
@@ -351,10 +355,41 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
 		handleDownload(conn, r, st, rl)
 	case MsgSecureUpload:
 		handleSecureUpload(conn, r, st, serverID)
+	case MsgTest:
+		handleTest(conn, r, st)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown type: %c\n", msgType)
 		SendStatus(conn, StatusError)
 	}
+}
+
+func handleTest(conn net.Conn, r io.Reader, st *store) {
+	fileSize, err := ReadTestRequest(r)
+	if err != nil {
+		return
+	}
+	free, err := getDiskFreeSpace(st.DataDir())
+	if err != nil {
+		free = 0
+	}
+	if err := binary.Write(conn, binary.BigEndian, free); err != nil {
+		return
+	}
+	payloadSize := uint32(TestPayloadSize)
+	if err := binary.Write(conn, binary.BigEndian, payloadSize); err != nil {
+		return
+	}
+	// Send payload (zeros) for bandwidth test
+	buf := make([]byte, payloadSize)
+	for len(buf) > 0 {
+		n, _ := conn.Write(buf)
+		if n <= 0 {
+			return
+		}
+		buf = buf[n:]
+	}
+	// Client may close; we don't check fileSize vs free here, client does
+	_ = fileSize
 }
 
 func handleUpload(conn net.Conn, r io.Reader, st *store) {

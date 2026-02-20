@@ -29,6 +29,7 @@ func main() {
 
 	if len(os.Args) < 2 {
 		printUsage()
+		printTotalNetworkStorage()
 		os.Exit(1)
 	}
 
@@ -93,10 +94,12 @@ func main() {
 	case "secure":
 		if len(os.Args) < 3 {
 			printUsage()
+			printTotalNetworkStorage()
 			os.Exit(1)
 		}
 		if os.Args[2] != "send" {
 			printUsage()
+			printTotalNetworkStorage()
 			os.Exit(1)
 		}
 		args := os.Args[3:]
@@ -114,8 +117,20 @@ func main() {
 		}
 	default:
 		printUsage()
+		printTotalNetworkStorage()
 		os.Exit(1)
 	}
+}
+
+func printTotalNetworkStorage() {
+	total := getTotalNetworkStorage(3 * time.Second)
+	const gb = 1024 * 1024 * 1024
+	if total == 0 {
+		fmt.Println("Total network storage: N/A")
+		return
+	}
+	gbF := float64(total) / float64(gb)
+	fmt.Printf("Total network storage: %.2f GB\n", gbF)
 }
 
 func printUsage() {

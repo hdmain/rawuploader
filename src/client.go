@@ -162,6 +162,61 @@ func tryServersFromList(fileSize int64) (net.Conn, int, error) {
 	return conn, best.serverID, nil
 }
 
+// getServerFreeSpace returns free disk space (bytes) for one server, or 0 on failure.
+func getServerFreeSpace(addr string) uint64 {
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return 0
+	}
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	defer conn.Close()
+	if WriteMessageType(conn, MsgTest) != nil || WriteTestRequest(conn, 0) != nil {
+		return 0
+	}
+	var free uint64
+	if binary.Read(conn, binary.BigEndian, &free) != nil {
+		return 0
+	}
+	return free
+}
+
+// getTotalNetworkStorage returns sum of free disk space (bytes) across all servers from the list. Timeout applies to the whole operation.
+func getTotalNetworkStorage(timeout time.Duration) uint64 {
+	addrs, err := fetchServerList()
+	if err != nil {
+		return 0
+	}
+	var total uint64
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		for _, addr := range addrs {
+			if addr == "" {
+				continue
+			}
+			wg.Add(1)
+			go func(a string) {
+				defer wg.Done()
+				free := getServerFreeSpace(a)
+				if free > 0 {
+					mu.Lock()
+					total += free
+					mu.Unlock()
+				}
+			}(addr)
+		}
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return total
+	case <-time.After(timeout):
+		return total
+	}
+}
+
 func dialWithFallback(addr string) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err == nil {
@@ -170,7 +225,6 @@ func dialWithFallback(addr string) (net.Conn, error) {
 	}
 	return nil, fmt.Errorf("connect to %s: %w", addr, err)
 }
-
 
 func setTCPBuffers(conn net.Conn) {
 	if tc, ok := conn.(*net.TCPConn); ok {

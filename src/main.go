@@ -1,11 +1,21 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
+
+const versionURL = "https://raw.githubusercontent.com/hdmain/rawuploader/main/version"
+
+// Version – change only here; remote check uses GitHub raw version file.
+var Version = "1.1.5"
 
 var (
 	StorageDuration = 30 * time.Minute
@@ -30,6 +40,7 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		printTotalNetworkStorage()
+		printVersionCheck()
 		os.Exit(1)
 	}
 
@@ -95,11 +106,13 @@ func main() {
 		if len(os.Args) < 3 {
 			printUsage()
 			printTotalNetworkStorage()
+			printVersionCheck()
 			os.Exit(1)
 		}
 		if os.Args[2] != "send" {
 			printUsage()
 			printTotalNetworkStorage()
+			printVersionCheck()
 			os.Exit(1)
 		}
 		args := os.Args[3:]
@@ -118,6 +131,7 @@ func main() {
 	default:
 		printUsage()
 		printTotalNetworkStorage()
+		printVersionCheck()
 		os.Exit(1)
 	}
 }
@@ -131,6 +145,61 @@ func printTotalNetworkStorage() {
 	}
 	gbF := float64(total) / float64(gb)
 	fmt.Printf("Total network storage: %.2f GB\n", gbF)
+}
+
+func printVersionCheck() {
+	remote, err := fetchRemoteVersion(3 * time.Second)
+	if err != nil || remote == "" {
+		return
+	}
+	remote = strings.TrimSpace(remote)
+	if versionLess(Version, remote) {
+		fmt.Printf("New version available: %s (you have %s)\n", remote, Version)
+	}
+}
+
+func fetchRemoteVersion(timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, versionURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(body)), nil
+}
+
+// versionLess returns true if a < b (e.g. "1.1.5" < "1.1.6").
+func versionLess(a, b string) bool {
+	partsA := strings.Split(strings.TrimSpace(a), ".")
+	partsB := strings.Split(strings.TrimSpace(b), ".")
+	for i := 0; i < len(partsA) || i < len(partsB); i++ {
+		var na, nb int
+		if i < len(partsA) {
+			na, _ = strconv.Atoi(partsA[i])
+		}
+		if i < len(partsB) {
+			nb, _ = strconv.Atoi(partsB[i])
+		}
+		if na < nb {
+			return true
+		}
+		if na > nb {
+			return false
+		}
+	}
+	return false
 }
 
 func printUsage() {

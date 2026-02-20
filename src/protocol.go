@@ -236,7 +236,7 @@ func WriteEncryptedUpload(w io.Writer, code string, name string, plaintextChecks
 	return nil
 }
 
-// ReadSecureUpload odczytuje body secure uploadu (bez kodu): name, checksum, nonce, sealed. Limit: maxSealed.
+// ReadSecureUpload reads secure upload body (no code): name, checksum, nonce, sealed. Limit: maxSealed.
 func ReadSecureUpload(r io.Reader, maxSealed int64) (name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {
 	var nameLen uint16
 	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {

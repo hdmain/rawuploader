@@ -16,6 +16,46 @@ import (
 	"time"
 )
 
+const publicIPURL = "https://api.ipify.org"
+
+func getServerPublicIP() (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(publicIPURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// findServerIDByIP returns (id, true) if a list address matches ourIP, else (0, false).
+func findServerIDByIP(ourIP string) (int, bool) {
+	addrs, err := fetchServerList()
+	if err != nil {
+		return 0, false
+	}
+	for id, hostPort := range addrs {
+		if hostPort == "" {
+			continue
+		}
+		host, _, err := net.SplitHostPort(hostPort)
+		if err != nil {
+			continue
+		}
+		if host == ourIP {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
 type StoredBlob struct {
 	Name              string
 	PlaintextChecksum []byte
@@ -185,7 +225,20 @@ func (s *store) cleanupExpired() {
 	}
 }
 
-func runServer(serverID int, port, dataDir, webPort string) error {
+func runServer(serverIDFromFlag int, port, dataDir, webPort string) error {
+	serverID := serverIDFromFlag
+	if ourIP, err := getServerPublicIP(); err == nil {
+		if id, ok := findServerIDByIP(ourIP); ok {
+			serverID = id
+			fmt.Printf("tcpraw server: auto-detected id=%d (address %s is on the list)\n", serverID, ourIP)
+		} else {
+			fmt.Println("tcpraw server: running outside main network (your address is not on the list).")
+			fmt.Printf("  To send files to this server, specify address manually, e.g.:\n")
+			fmt.Printf("  tcpraw send <file> %s:%s\n", ourIP, port)
+			fmt.Printf("  tcpraw secure send <file> %s:%s\n", ourIP, port)
+		}
+	}
+
 	st, err := newStore(dataDir)
 	if err != nil {
 		return err
@@ -305,7 +358,7 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
 }
 
 func handleUpload(conn net.Conn, r io.Reader, st *store) {
-	// Strumieniowe wczytywanie nagłówka uploadu (chunked) i zapisywanie zaszyfrowanych chunków prosto na dysk.
+	// Stream read of upload header (chunked) and write encrypted chunks straight to disk.
 	codeBuf := make([]byte, CodeLength)
 	if _, err := io.ReadFull(r, codeBuf); err != nil {
 		if err != io.EOF {
@@ -406,7 +459,7 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 			SendStatus(conn, StatusError)
 			return
 		}
-		// Zapisz header do pliku
+		// Write header to file
 		if _, err := df.Write(header[:16]); err != nil {
 			df.Close()
 			os.Remove(dataPath)
@@ -414,7 +467,7 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 			SendStatus(conn, StatusError)
 			return
 		}
-		// Zapisz zaszyfrowany chunk
+		// Write encrypted chunk
 		sealed := make([]byte, sealedLen)
 		if _, err := io.ReadFull(r, sealed); err != nil {
 			df.Close()

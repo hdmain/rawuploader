@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-// sendChunkedFromFile wysyła zaszyfrowane chunki z pliku .dat w formacie protokołu chunked.
+// sendChunkedFromFile sends encrypted chunks from the .dat file in chunked protocol format.
 func sendChunkedFromFile(w io.Writer, dataPath string, blob *StoredBlob) error {
 	df, err := os.Open(dataPath)
 	if err != nil {

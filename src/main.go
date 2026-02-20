@@ -48,15 +48,19 @@ func main() {
 		_ = clientSendCmd.Parse(os.Args[2:])
 		args := clientSendCmd.Args()
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw send <file>")
+			fmt.Fprintln(os.Stderr, "usage: tcpraw send <file> [host:port]")
 			os.Exit(1)
 		}
-		if err := runClientSend(args[0]); err != nil {
+		addr := ""
+		if len(args) >= 2 {
+			addr = args[1]
+		}
+		if err := runClientSend(args[0], addr); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
 	case "get":
-		// Wyciągamy -o/--output z dowolnej pozycji, bo flag.Parse() przestaje przy pierwszym nie-flagu
+		// Extract -o/--output from any position (flag.Parse stops at first non-flag)
 		getArgs := os.Args[2:]
 		var getOutput string
 		var getPositional []string
@@ -97,10 +101,14 @@ func main() {
 		}
 		args := os.Args[3:]
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file>")
+			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file> [host:port]")
 			os.Exit(1)
 		}
-		if err := runClientSecureSend(args[0]); err != nil {
+		addr := ""
+		if len(args) >= 2 {
+			addr = args[1]
+		}
+		if err := runClientSecureSend(args[0], addr); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -122,8 +130,8 @@ func printUsage() {
 	fmt.Println("  tcpraw server [-id=0] [-port=9999] [-dir=./data] [-web=8080]")
 	fmt.Println("    -id=ID     server id 0–9 (first digit of generated codes); default 0")
 	fmt.Println("    -web=PORT serve download page in browser (no client needed)")
-	fmt.Println("  tcpraw send <file>")
-	fmt.Println("  tcpraw secure send <file>")
+	fmt.Println("  tcpraw send <file> [host:port]   (host:port = server not on list)")
+	fmt.Println("  tcpraw secure send <file> [host:port]")
 	fmt.Println("  tcpraw get <6-digit-code> [-o file]")
 	fmt.Println()
 	fmt.Println("Servers are read from the address list (first digit of code = server id).")

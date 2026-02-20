@@ -50,7 +50,7 @@ func fetchServerList() ([]string, error) {
 		}
 		addrs[id] = hostPort
 	}
-	// Domyślny serwer gdy lista pusta lub brak id 0
+	// Default server when list is empty or id 0 missing
 	if addrs[0] == "" {
 		addrs[0] = "94.249.197.155:9999"
 	}
@@ -116,7 +116,7 @@ func generateCode() string {
 	return generateCodeWithServerID(0)
 }
 
-// generateCodeWithServerID – pierwsza cyfra kodu = id serwera (0–9), reszta losowa.
+// generateCodeWithServerID – first digit of code = server id (0–9), rest random.
 func generateCodeWithServerID(serverID int) string {
 	if serverID < 0 || serverID > 9 {
 		serverID = 0
@@ -124,7 +124,7 @@ func generateCodeWithServerID(serverID int) string {
 	return fmt.Sprintf("%d%05d", serverID, rand.Intn(100000))
 }
 
-func runClientSend(filePath string) error {
+func runClientSend(filePath string, addr string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
@@ -157,9 +157,21 @@ func runClientSend(filePath string) error {
 		}
 	}
 	plaintextChecksum := hasher.Sum(nil)
-	conn, serverID, err := tryServersFromList()
-	if err != nil {
-		return err
+	var conn net.Conn
+	var serverID int
+	if addr != "" {
+		var err error
+		conn, err = dialWithFallback(addr)
+		if err != nil {
+			return err
+		}
+		serverID = 0
+	} else {
+		var err error
+		conn, serverID, err = tryServersFromList()
+		if err != nil {
+			return err
+		}
 	}
 	defer conn.Close()
 	code := generateCodeWithServerID(serverID)
@@ -220,7 +232,7 @@ func runClientSend(filePath string) error {
 	}
 }
 
-func runClientSecureSend(filePath string) error {
+func runClientSecureSend(filePath string, addr string) error {
 	plaintext, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
@@ -238,14 +250,19 @@ func runClientSecureSend(filePath string) error {
 		return fmt.Errorf("encrypt: %w", err)
 	}
 
-	conn, _, err := tryServersFromList()
+	var conn net.Conn
+	if addr != "" {
+		conn, err = dialWithFallback(addr)
+	} else {
+		conn, _, err = tryServersFromList()
+	}
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
 	bw := bufio.NewWriterSize(conn, bufSize)
-	if err := WriteMessageType(bw, MsgSecureUpload); err != nil {
+	if err = WriteMessageType(bw, MsgSecureUpload); err != nil {
 		return err
 	}
 	baseName := filepath.Base(filePath)

@@ -8,8 +8,7 @@ import (
 )
 
 var (
-	DefaultServerAddr = "94.249.197.155:9999"
-	StorageDuration   = 30 * time.Minute
+	StorageDuration = 30 * time.Minute
 	CleanupInterval   = 5 * time.Minute
 	MaxBlobSize       = int64(15 * 1024 * 1024 * 1024) // 15 GB per upload
 	RateLimitAttempts = 50
@@ -19,6 +18,7 @@ var (
 
 func main() {
 	serverCmd := flag.NewFlagSet("server", flag.ExitOnError)
+	serverID := serverCmd.Int("id", 0, "server id 0–9 (first digit of generated codes)")
 	serverPort := serverCmd.String("port", "9999", "listen port")
 	serverDir := serverCmd.String("dir", "./data", "directory for stored encrypted blobs")
 	serverWeb := serverCmd.String("web", "", "web port for browser download page (e.g. 8080); empty = disabled")
@@ -35,7 +35,12 @@ func main() {
 	switch os.Args[1] {
 	case "server":
 		_ = serverCmd.Parse(os.Args[2:])
-		if err := runServer(*serverPort, *serverDir, *serverWeb); err != nil {
+		id := *serverID
+		if id < 0 || id > 9 {
+			fmt.Fprintln(os.Stderr, "server id must be 0–9")
+			os.Exit(1)
+		}
+		if err := runServer(id, *serverPort, *serverDir, *serverWeb); err != nil {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
 			os.Exit(1)
 		}
@@ -43,14 +48,10 @@ func main() {
 		_ = clientSendCmd.Parse(os.Args[2:])
 		args := clientSendCmd.Args()
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw send <file> [host:port]")
+			fmt.Fprintln(os.Stderr, "usage: tcpraw send <file>")
 			os.Exit(1)
 		}
-		addr := DefaultServerAddr
-		if len(args) >= 2 {
-			addr = args[1]
-		}
-		if err := runClientSend(addr, args[0]); err != nil {
+		if err := runClientSend(args[0]); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -73,19 +74,15 @@ func main() {
 		_ = clientGetCmd.Parse(getPositional)
 		args := clientGetCmd.Args()
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw get <6-digit-code> [host:port] [-o file]")
+			fmt.Fprintln(os.Stderr, "usage: tcpraw get <6-digit-code> [-o file]")
 			os.Exit(1)
-		}
-		addr := DefaultServerAddr
-		if len(args) >= 2 {
-			addr = args[1]
 		}
 		code := args[0]
 		outPath := getOutput
 		if outPath == "" {
 			outPath = *clientGetOut
 		}
-		if err := runClientGet(addr, code, outPath); err != nil {
+		if err := runClientGet(code, outPath); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -100,14 +97,10 @@ func main() {
 		}
 		args := os.Args[3:]
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file> [host:port]")
+			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file>")
 			os.Exit(1)
 		}
-		addr := DefaultServerAddr
-		if len(args) >= 2 {
-			addr = args[1]
-		}
-		if err := runClientSecureSend(addr, args[0]); err != nil {
+		if err := runClientSecureSend(args[0]); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -126,13 +119,14 @@ func printUsage() {
 	fmt.Println("  secure send – encrypt with your own 256-bit key; server assigns code; use get + key to download")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  tcpraw server [-port=9999] [-dir=./data] [-web=8080]")
-	fmt.Println("    -web=PORT  serve download page in browser (no client needed)")
-	fmt.Println("  tcpraw send <file> [host:port]")
-	fmt.Println("  tcpraw secure send <file> [host:port]")
-	fmt.Println("  tcpraw get <6-digit-code> [host:port] [-o file]")
+	fmt.Println("  tcpraw server [-id=0] [-port=9999] [-dir=./data] [-web=8080]")
+	fmt.Println("    -id=ID     server id 0–9 (first digit of generated codes); default 0")
+	fmt.Println("    -web=PORT serve download page in browser (no client needed)")
+	fmt.Println("  tcpraw send <file>")
+	fmt.Println("  tcpraw secure send <file>")
+	fmt.Println("  tcpraw get <6-digit-code> [-o file]")
 	fmt.Println()
-	fmt.Printf("Default host:port is %s (change DefaultServerAddr in main.go)\n", DefaultServerAddr)
+	fmt.Println("Servers are read from the address list (first digit of code = server id).")
 	fmt.Printf("Data kept %v, cleanup every %v, max upload %d MB, rate limit %d codes/%v then %v ban\n",
 		StorageDuration, CleanupInterval, MaxBlobSize/(1024*1024), RateLimitAttempts, RateLimitWindow, BanDuration)
 	fmt.Println()

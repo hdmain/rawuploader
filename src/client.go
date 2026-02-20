@@ -17,36 +17,76 @@ import (
 )
 
 const (
-	fallbackAddrURL = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
-	dialTimeout     = 30 * time.Second
-	bufSize         = 2 * 1024 * 1024 // 2 MB bufio for throughput
-	tcpBufferSize   = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
+	addressListURL = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
+	dialTimeout    = 30 * time.Second
+	bufSize        = 2 * 1024 * 1024 // 2 MB bufio for throughput
+	tcpBufferSize  = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
 )
+
+// serverList: [id 0..9] = "host:port"
+func fetchServerList() ([]string, error) {
+	body, err := fetchAddressFromURL(addressListURL)
+	if err != nil {
+		return nil, err
+	}
+	addrs := make([]string, 10)
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.Index(line, ":")
+		if idx <= 0 {
+			continue
+		}
+		idStr := line[:idx]
+		hostPort := strings.TrimSpace(line[idx+1:])
+		if hostPort == "" {
+			continue
+		}
+		var id int
+		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id < 0 || id > 9 {
+			continue
+		}
+		addrs[id] = hostPort
+	}
+	// Domyślny serwer gdy lista pusta lub brak id 0
+	if addrs[0] == "" {
+		addrs[0] = "94.249.197.155:9999"
+	}
+	return addrs, nil
+}
+
+func tryServersFromList() (net.Conn, int, error) {
+	addrs, err := fetchServerList()
+	if err != nil {
+		return nil, 0, fmt.Errorf("fetch server list: %w", err)
+	}
+	var lastErr error
+	for id, addr := range addrs {
+		if addr == "" {
+			continue
+		}
+		conn, err := net.DialTimeout("tcp", addr, dialTimeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		setTCPBuffers(conn)
+		return conn, id, nil
+	}
+	return nil, 0, fmt.Errorf("no server available: %w", lastErr)
+}
 
 func dialWithFallback(addr string) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err == nil {
+		setTCPBuffers(conn)
 		return conn, nil
 	}
-	fallback, fetchErr := fetchAddressFromURL(fallbackAddrURL)
-	if fetchErr != nil {
-		return nil, fmt.Errorf("connect to %s: %w (fallback fetch failed: %v)", addr, err, fetchErr)
-	}
-	fallback = strings.TrimSpace(fallback)
-	if idx := strings.IndexByte(fallback, '\n'); idx >= 0 {
-		fallback = strings.TrimSpace(fallback[:idx])
-	}
-	if fallback == "" {
-		return nil, fmt.Errorf("connect to %s: %w", addr, err)
-	}
-	fmt.Fprintf(os.Stderr, "info: trying fallback address %s\n", fallback)
-	conn, err2 := net.DialTimeout("tcp", fallback, dialTimeout)
-	if err2 != nil {
-		return nil, fmt.Errorf("connect to %s: %w (fallback %s: %v)", addr, err, fallback, err2)
-	}
-	setTCPBuffers(conn)
-	return conn, nil
+	return nil, fmt.Errorf("connect to %s: %w", addr, err)
 }
+
 
 func setTCPBuffers(conn net.Conn) {
 	if tc, ok := conn.(*net.TCPConn); ok {
@@ -73,10 +113,18 @@ func fetchAddressFromURL(url string) (string, error) {
 }
 
 func generateCode() string {
-	return fmt.Sprintf("%06d", 100000+rand.Intn(900000))
+	return generateCodeWithServerID(0)
 }
 
-func runClientSend(addr, filePath string) error {
+// generateCodeWithServerID – pierwsza cyfra kodu = id serwera (0–9), reszta losowa.
+func generateCodeWithServerID(serverID int) string {
+	if serverID < 0 || serverID > 9 {
+		serverID = 0
+	}
+	return fmt.Sprintf("%d%05d", serverID, rand.Intn(100000))
+}
+
+func runClientSend(filePath string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
@@ -109,18 +157,17 @@ func runClientSend(addr, filePath string) error {
 		}
 	}
 	plaintextChecksum := hasher.Sum(nil)
-	code := generateCode()
+	conn, serverID, err := tryServersFromList()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	code := generateCodeWithServerID(serverID)
 	numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek file: %w", err)
 	}
-
-	conn, err := dialWithFallback(addr)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
 
 	bw := bufio.NewWriterSize(conn, bufSize)
 	if err := WriteMessageType(bw, MsgUpload); err != nil {
@@ -173,7 +220,7 @@ func runClientSend(addr, filePath string) error {
 	}
 }
 
-func runClientSecureSend(addr, filePath string) error {
+func runClientSecureSend(filePath string) error {
 	plaintext, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
@@ -191,7 +238,7 @@ func runClientSecureSend(addr, filePath string) error {
 		return fmt.Errorf("encrypt: %w", err)
 	}
 
-	conn, err := dialWithFallback(addr)
+	conn, _, err := tryServersFromList()
 	if err != nil {
 		return err
 	}
@@ -237,11 +284,22 @@ func runClientSecureSend(addr, filePath string) error {
 	return nil
 }
 
-func runClientGet(addr, code, outputPath string) error {
+func runClientGet(code, outputPath string) error {
 	if len(code) != CodeLength {
 		return fmt.Errorf("code must be 6 digits")
 	}
-
+	serverID := int(code[0] - '0')
+	if serverID < 0 || serverID > 9 {
+		return fmt.Errorf("invalid code: first digit must be 0–9 (server id)")
+	}
+	addrs, err := fetchServerList()
+	if err != nil {
+		return fmt.Errorf("fetch server list: %w", err)
+	}
+	if addrs[serverID] == "" {
+		return fmt.Errorf("server %d not in list", serverID)
+	}
+	addr := addrs[serverID]
 	conn, err := dialWithFallback(addr)
 	if err != nil {
 		return err

@@ -185,7 +185,7 @@ func (s *store) cleanupExpired() {
 	}
 }
 
-func runServer(port, dataDir, webPort string) error {
+func runServer(serverID int, port, dataDir, webPort string) error {
 	st, err := newStore(dataDir)
 	if err != nil {
 		return err
@@ -210,8 +210,8 @@ func runServer(port, dataDir, webPort string) error {
 	}
 	defer ln.Close()
 
-	fmt.Printf("tcpraw server: listening on :%s, data dir %s, blobs kept %v, max %d MB, rate limit %d/%v then %v ban\n",
-		port, dataDir, StorageDuration, MaxBlobSize/(1024*1024), RateLimitAttempts, RateLimitWindow, BanDuration)
+	fmt.Printf("tcpraw server: id=%d, listening on :%s, data dir %s, blobs kept %v, max %d MB, rate limit %d/%v then %v ban\n",
+		serverID, port, dataDir, StorageDuration, MaxBlobSize/(1024*1024), RateLimitAttempts, RateLimitWindow, BanDuration)
 
 	for {
 		conn, err := ln.Accept()
@@ -219,7 +219,7 @@ func runServer(port, dataDir, webPort string) error {
 			fmt.Fprintf(os.Stderr, "accept: %v\n", err)
 			continue
 		}
-		go handleConn(conn, st, rl)
+		go handleConn(conn, st, rl, serverID)
 	}
 }
 
@@ -278,7 +278,7 @@ func extractIP(addr string) string {
 	return addr
 }
 
-func handleConn(conn net.Conn, st *store, rl *rateLimiter) {
+func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
 	defer conn.Close()
 	setTCPBuffers(conn)
 	r := bufio.NewReaderSize(conn, bufSize)
@@ -297,7 +297,7 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter) {
 	case MsgDownload:
 		handleDownload(conn, r, st, rl)
 	case MsgSecureUpload:
-		handleSecureUpload(conn, r, st)
+		handleSecureUpload(conn, r, st, serverID)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown type: %c\n", msgType)
 		SendStatus(conn, StatusError)
@@ -461,7 +461,7 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 	SendStatus(conn, StatusOK)
 }
 
-func handleSecureUpload(conn net.Conn, r io.Reader, st *store) {
+func handleSecureUpload(conn net.Conn, r io.Reader, st *store, serverID int) {
 	name, plaintextChecksum, nonce, sealed, err := ReadSecureUpload(r, MaxBlobSize)
 	if err != nil {
 		if err == ErrBlobTooLarge {
@@ -477,7 +477,7 @@ func handleSecureUpload(conn net.Conn, r io.Reader, st *store) {
 		SendStatus(conn, StatusError)
 		return
 	}
-	code := generateCode()
+	code := generateCodeWithServerID(serverID)
 	blob := &StoredBlob{
 		Name:              baseName,
 		PlaintextChecksum: plaintextChecksum,

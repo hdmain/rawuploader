@@ -157,6 +157,84 @@ func ReadTestRequest(r io.Reader) (fileSize uint64, err error) {
 	return fileSize, err
 }
 
+func WriteSecureUploadChunkedHeader(w io.Writer, name string, totalPlainLen int64, numChunks uint32, plaintextChecksum []byte) error {
+	nameBytes := []byte(name)
+	if len(nameBytes) > 0xFFFF {
+		nameBytes = nameBytes[:0xFFFF]
+	}
+	if err := binary.Write(w, binary.BigEndian, uint16(len(nameBytes))); err != nil {
+		return err
+	}
+	if _, err := w.Write(nameBytes); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint64(totalPlainLen)); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, numChunks); err != nil {
+		return err
+	}
+	if _, err := w.Write(plaintextChecksum); err != nil {
+		return err
+	}
+	return nil
+}
+
+func WriteChunk(w io.Writer, nonce, sealed []byte) error {
+	if len(nonce) != 12 {
+		return errors.New("nonce must be 12 bytes")
+	}
+	if _, err := w.Write(nonce); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(sealed))); err != nil {
+		return err
+	}
+	if _, err := w.Write(sealed); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ReadSecureUploadChunkedHeader(r io.Reader) (name string, totalPlainLen uint64, numChunks uint32, plaintextChecksum []byte, err error) {
+	var nameLen uint16
+	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
+		return "", 0, 0, nil, err
+	}
+	nameBuf := make([]byte, nameLen)
+	if _, err = io.ReadFull(r, nameBuf); err != nil {
+		return "", 0, 0, nil, err
+	}
+	name = string(nameBuf)
+	if err = binary.Read(r, binary.BigEndian, &totalPlainLen); err != nil {
+		return "", 0, 0, nil, err
+	}
+	if err = binary.Read(r, binary.BigEndian, &numChunks); err != nil {
+		return "", 0, 0, nil, err
+	}
+	plaintextChecksum = make([]byte, sha256.Size)
+	if _, err = io.ReadFull(r, plaintextChecksum); err != nil {
+		return "", 0, 0, nil, err
+	}
+	return name, totalPlainLen, numChunks, plaintextChecksum, nil
+}
+
+func ReadChunkRaw(r io.Reader) (nonce []byte, sealed []byte, err error) {
+	nonce = make([]byte, 12)
+	if _, err = io.ReadFull(r, nonce); err != nil {
+		return nil, nil, err
+	}
+	var sealedLen uint32
+	if err = binary.Read(r, binary.BigEndian, &sealedLen); err != nil {
+		return nil, nil, err
+	}
+	sealed = make([]byte, sealedLen)
+	if _, err = io.ReadFull(r, sealed); err != nil {
+		return nil, nil, err
+	}
+	return nonce, sealed, nil
+}
+
 func SendCodeResponse(w io.Writer, status byte, code string) error {
 	if len(code) != CodeLength {
 		return nil

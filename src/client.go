@@ -19,12 +19,13 @@ import (
 )
 
 const (
-	addressListURL   = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
-	dialTimeout      = 30 * time.Second
-	probeTimeout     = 1 * time.Second
-	probeDialTimeout = 500 * time.Millisecond
-	bufSize          = 2 * 1024 * 1024 // 2 MB bufio for throughput
-	tcpBufferSize    = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
+	addressListURL    = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
+	dialTimeout       = 30 * time.Second
+	probeTimeout      = 1 * time.Second
+	probeDialTimeout  = 500 * time.Millisecond
+	bufSize           = 2 * 1024 * 1024 // 2 MB bufio for throughput
+	tcpBufferSize     = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
+	maxSecureLoadRAM  = 500 * 1024 * 1024 // 500 MB; above this, secure send streams in chunks
 )
 
 // serverList: [id 0..9] = "host:port"
@@ -372,21 +373,26 @@ func runClientSend(filePath string, addr string) error {
 }
 
 func runClientSecureSend(filePath string, addr string) error {
-	plaintext, err := os.ReadFile(filePath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}
-	if len(plaintext) == 0 {
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory")
+	}
+	size := info.Size()
+	if size == 0 {
 		return fmt.Errorf("file is empty")
 	}
+
 	key := make([]byte, SecureKeySize)
 	if _, err := io.ReadFull(crand.Reader, key); err != nil {
 		return fmt.Errorf("generate key: %w", err)
-	}
-	plaintextChecksum := sha256.Sum256(plaintext)
-	nonce, sealed, err := encryptWithKey(key, plaintext)
-	if err != nil {
-		return fmt.Errorf("encrypt: %w", err)
 	}
 
 	var conn net.Conn
@@ -394,7 +400,7 @@ func runClientSecureSend(filePath string, addr string) error {
 		conn, err = dialWithFallback(addr)
 	} else {
 		fmt.Println("info: probing servers (disk space + bandwidth, max 1s)...")
-		conn, _, err = tryServersFromList(int64(len(plaintext)))
+		conn, _, err = tryServersFromList(size)
 	}
 	if err != nil {
 		return err
@@ -406,24 +412,96 @@ func runClientSecureSend(filePath string, addr string) error {
 		return err
 	}
 	baseName := filepath.Base(filePath)
-	start := time.Now()
-	progress := func(sent, total int64) {
-		elapsed := time.Since(start).Seconds()
-		if elapsed < 0.001 {
-			return
+
+	if size <= maxSecureLoadRAM {
+		plaintext, err := io.ReadAll(f)
+		if err != nil {
+			return fmt.Errorf("read file: %w", err)
 		}
-		speed := float64(sent) / elapsed
-		remaining := total - sent
-		fmt.Printf("\r  speed: %s/s  |  sent: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(sent)), formatBytes(float64(remaining)))
+		plaintextChecksum := sha256.Sum256(plaintext)
+		nonce, sealed, err := encryptWithKey(key, plaintext)
+		if err != nil {
+			return fmt.Errorf("encrypt: %w", err)
+		}
+		start := time.Now()
+		progress := func(sent, total int64) {
+			elapsed := time.Since(start).Seconds()
+			if elapsed < 0.001 {
+				return
+			}
+			speed := float64(sent) / elapsed
+			remaining := total - sent
+			fmt.Printf("\r  speed: %s/s  |  sent: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(sent)), formatBytes(float64(remaining)))
+		}
+		fmt.Println("info: sending encrypted file...")
+		if _, err := bw.Write([]byte{0}); err != nil {
+			return err
+		}
+		if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed, progress); err != nil {
+			return fmt.Errorf("send: %w", err)
+		}
+	} else {
+		fmt.Println("info: sending encrypted file in chunks (streaming, no full load)...")
+		if _, err := bw.Write([]byte{1}); err != nil {
+			return err
+		}
+		hasher := sha256.New()
+		chunkBuf := make([]byte, FileChunkSize)
+		var totalRead int64
+		for totalRead < size {
+			n, err := f.Read(chunkBuf)
+			if n > 0 {
+				hasher.Write(chunkBuf[:n])
+				totalRead += int64(n)
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("read file: %w", err)
+			}
+		}
+		plaintextChecksum := hasher.Sum(nil)
+		numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
+		if err := WriteSecureUploadChunkedHeader(bw, baseName, size, numChunks, plaintextChecksum); err != nil {
+			return fmt.Errorf("send header: %w", err)
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("seek file: %w", err)
+		}
+		start := time.Now()
+		var sent int64
+		for sent < size {
+			n, err := f.Read(chunkBuf)
+			if n > 0 {
+				nonce, sealed, encErr := encryptWithKey(key, chunkBuf[:n])
+				if encErr != nil {
+					return fmt.Errorf("encrypt chunk: %w", encErr)
+				}
+				if err := WriteChunk(bw, nonce, sealed); err != nil {
+					return fmt.Errorf("write chunk: %w", err)
+				}
+				sent += int64(n)
+				elapsed := time.Since(start).Seconds()
+				if elapsed >= 0.001 {
+					speed := float64(sent) / elapsed
+					remaining := size - sent
+					fmt.Printf("\r  speed: %s/s  |  sent: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(sent)), formatBytes(float64(remaining)))
+				}
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("read file: %w", err)
+			}
+		}
+		fmt.Println()
 	}
-	fmt.Println("info: sending encrypted file...")
-	if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed, progress); err != nil {
-		return fmt.Errorf("send: %w", err)
-	}
+
 	if err := bw.Flush(); err != nil {
 		return fmt.Errorf("flush: %w", err)
 	}
-	fmt.Println()
 
 	fmt.Println("info: waiting for server...")
 	status, code, err := ReadCodeResponse(conn)
@@ -569,6 +647,63 @@ func runClientGet(code, outputPath string) error {
 		}
 		if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
 			return fmt.Errorf("write file %s: %w", savePath, err)
+		}
+		fmt.Printf("Downloaded: %s\n", savePath)
+		return nil
+	}
+
+	if formatByte[0] == 3 {
+		name, totalPlainLen, numChunks, plaintextChecksum, err := ReadEncryptedBlobChunkedHeader(br)
+		if err != nil {
+			return fmt.Errorf("read blob header: %w", err)
+		}
+		fmt.Println()
+		fmt.Print("Enter key (64 hex characters): ")
+		var keyHex string
+		if _, err := fmt.Scanln(&keyHex); err != nil {
+			return fmt.Errorf("read key: %w", err)
+		}
+		keyHex = strings.TrimSpace(keyHex)
+		if len(keyHex) != 64 {
+			return fmt.Errorf("key must be 64 hex characters (32 bytes)")
+		}
+		key, err := hex.DecodeString(keyHex)
+		if err != nil {
+			return fmt.Errorf("invalid hex key: %w", err)
+		}
+		savePath := outputPath
+		if savePath == "" {
+			savePath = filepath.Base(name)
+		}
+		if savePath == "" {
+			savePath = "downloaded_file"
+		}
+		out, err := os.Create(savePath)
+		if err != nil {
+			return fmt.Errorf("create file %s: %w", savePath, err)
+		}
+		defer out.Close()
+		hasher := sha256.New()
+		var downloaded int64
+		for i := uint32(0); i < numChunks; i++ {
+			nonce, sealed, err := ReadChunkRaw(br)
+			if err != nil {
+				return fmt.Errorf("read chunk: %w", err)
+			}
+			pt, err := decryptWithKey(key, nonce, sealed)
+			if err != nil {
+				return fmt.Errorf("decrypt chunk: %w", err)
+			}
+			if _, err := out.Write(pt); err != nil {
+				return fmt.Errorf("write chunk: %w", err)
+			}
+			hasher.Write(pt)
+			downloaded += int64(len(pt))
+			progress(downloaded, int64(totalPlainLen))
+		}
+		fmt.Println()
+		if !checksumEqual(hasher.Sum(nil), plaintextChecksum) {
+			return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
 		}
 		fmt.Printf("Downloaded: %s\n", savePath)
 		return nil

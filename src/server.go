@@ -550,6 +550,15 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 }
 
 func handleSecureUpload(conn net.Conn, r io.Reader, st *store, serverID int) {
+	formatByte := make([]byte, 1)
+	if _, err := io.ReadFull(r, formatByte); err != nil {
+		SendStatus(conn, StatusError)
+		return
+	}
+	if formatByte[0] == 1 {
+		handleSecureUploadChunked(conn, r, st, serverID)
+		return
+	}
 	name, plaintextChecksum, nonce, sealed, err := ReadSecureUpload(r, MaxBlobSize)
 	if err != nil {
 		if err == ErrBlobTooLarge {
@@ -585,6 +594,85 @@ func handleSecureUpload(conn net.Conn, r io.Reader, st *store, serverID int) {
 	}
 }
 
+func handleSecureUploadChunked(conn net.Conn, r io.Reader, st *store, serverID int) {
+	name, totalPlainLen, numChunks, plaintextChecksum, err := ReadSecureUploadChunkedHeader(r)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read secure chunked header: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	if MaxBlobSize > 0 && int64(totalPlainLen) > MaxBlobSize {
+		fmt.Fprintf(os.Stderr, "secure chunked upload rejected: exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+		SendStatus(conn, StatusError)
+		return
+	}
+	baseName := filepath.Base(name)
+	if baseName == "" || strings.Contains(baseName, "..") {
+		SendStatus(conn, StatusError)
+		return
+	}
+	code := generateCodeWithServerID(serverID)
+	dataPath := st.dataPath(code)
+	df, err := os.Create(dataPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create data file: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	for i := uint32(0); i < numChunks; i++ {
+		nonce, sealed, err := ReadChunkRaw(r)
+		if err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			fmt.Fprintf(os.Stderr, "read secure chunk: %v\n", err)
+			SendStatus(conn, StatusError)
+			return
+		}
+		if _, err := df.Write(nonce); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			SendStatus(conn, StatusError)
+			return
+		}
+		if err := binary.Write(df, binary.BigEndian, uint32(len(sealed))); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			SendStatus(conn, StatusError)
+			return
+		}
+		if _, err := df.Write(sealed); err != nil {
+			df.Close()
+			os.Remove(dataPath)
+			SendStatus(conn, StatusError)
+			return
+		}
+	}
+	if err := df.Close(); err != nil {
+		os.Remove(dataPath)
+		SendStatus(conn, StatusError)
+		return
+	}
+	blob := &StoredBlob{
+		Name:              baseName,
+		PlaintextChecksum: plaintextChecksum,
+		TotalPlainLen:     totalPlainLen,
+		NumChunks:         numChunks,
+		Chunked:           true,
+		Secure:            true,
+		CreatedAt:         time.Now(),
+	}
+	if err := st.put(code, blob); err != nil {
+		os.Remove(dataPath)
+		fmt.Fprintf(os.Stderr, "save secure chunked: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	fmt.Printf("Secure upload (chunked): %s (code %s)\n", baseName, code)
+	if err := SendCodeResponse(conn, StatusOK, code); err != nil {
+		return
+	}
+}
+
 func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 	ip := extractIP(conn.RemoteAddr().String())
 	if !rl.allow(ip) {
@@ -615,7 +703,15 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		return
 	}
 	bw := bufio.NewWriterSize(conn, bufSize)
-	if blob.Secure {
+	if blob.Secure && blob.Chunked {
+		if _, err := bw.Write([]byte{3}); err != nil {
+			return
+		}
+		if err := sendChunkedFromFile(bw, st.dataPath(code), blob); err != nil {
+			fmt.Fprintf(os.Stderr, "send secure chunked: %v\n", err)
+			return
+		}
+	} else if blob.Secure {
 		if _, err := bw.Write([]byte{2}); err != nil {
 			return
 		}

@@ -15,10 +15,10 @@ import (
 const versionURL = "https://raw.githubusercontent.com/hdmain/rawuploader/main/version"
 
 // Version – change only here; remote check uses GitHub raw version file.
-var Version = "1.1.5"
+var Version = "1.1.6"
 
 var (
-	StorageDuration = 30 * time.Minute
+	StorageDuration   = 30 * time.Minute
 	CleanupInterval   = 5 * time.Minute
 	MaxBlobSize       = int64(15 * 1024 * 1024 * 1024) // 15 GB per upload
 	RateLimitAttempts = 50
@@ -32,6 +32,7 @@ func main() {
 	serverPort := serverCmd.String("port", "9999", "listen port")
 	serverDir := serverCmd.String("dir", "./data", "directory for stored encrypted blobs")
 	serverWeb := serverCmd.String("web", "", "web port for browser download page (e.g. 8080); empty = disabled")
+	serverMaxSizeMB := serverCmd.Int64("maxsize", 0, "max upload size in MB (0 = use default from code)")
 
 	clientSendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 	clientGetCmd := flag.NewFlagSet("get", flag.ExitOnError)
@@ -52,7 +53,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "server id must be 0–9")
 			os.Exit(1)
 		}
-		if err := runServer(id, *serverPort, *serverDir, *serverWeb); err != nil {
+		maxBlob := MaxBlobSize
+		if *serverMaxSizeMB > 0 {
+			maxBlob = *serverMaxSizeMB * 1024 * 1024
+		}
+		if err := runServer(id, *serverPort, *serverDir, *serverWeb, maxBlob); err != nil {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
 			os.Exit(1)
 		}
@@ -211,9 +216,10 @@ func printUsage() {
 	fmt.Println("  secure send – encrypt with your own 256-bit key; server assigns code; use get + key to download")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  tcpraw server [-id=0] [-port=9999] [-dir=./data] [-web=8080]")
-	fmt.Println("    -id=ID     server id 0–9 (first digit of generated codes); default 0")
-	fmt.Println("    -web=PORT serve download page in browser (no client needed)")
+	fmt.Println("  tcpraw server [-id=0] [-port=9999] [-dir=./data] [-web=8080] [-maxsize=0]")
+	fmt.Println("    -id=ID       server id 0–9 (first digit of generated codes); default 0")
+	fmt.Println("    -web=PORT    serve download page in browser (no client needed)")
+	fmt.Println("    -maxsize=MB  max upload size in MB (0 = default from code)")
 	fmt.Println("  tcpraw send <file> [host:port]   (host:port = server not on list)")
 	fmt.Println("  tcpraw secure send <file> [host:port]")
 	fmt.Println("  tcpraw get <6-digit-code> [-o file]")

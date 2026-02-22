@@ -71,6 +71,9 @@ type StoredBlob struct {
 
 const indexFilename = ".index.gob"
 
+// serverMaxBlobSize is set at runServer start; handlers use it for upload size limit.
+var serverMaxBlobSize int64
+
 type store struct {
 	mu               sync.RWMutex
 	index            map[string]time.Time
@@ -229,7 +232,8 @@ func (s *store) cleanupExpired() {
 	}
 }
 
-func runServer(serverIDFromFlag int, port, dataDir, webPort string) error {
+func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize int64) error {
+	serverMaxBlobSize = maxBlobSize
 	serverID := serverIDFromFlag
 	if ourIP, err := getServerPublicIP(); err == nil {
 		if id, ok := findServerIDByIP(ourIP); ok {
@@ -268,7 +272,7 @@ func runServer(serverIDFromFlag int, port, dataDir, webPort string) error {
 	defer ln.Close()
 
 	fmt.Printf("tcpraw server: id=%d, listening on :%s, data dir %s, blobs kept %v, max %d MB, rate limit %d/%v then %v ban\n",
-		serverID, port, dataDir, StorageDuration, MaxBlobSize/(1024*1024), RateLimitAttempts, RateLimitWindow, BanDuration)
+		serverID, port, dataDir, StorageDuration, serverMaxBlobSize/(1024*1024), RateLimitAttempts, RateLimitWindow, BanDuration)
 
 	for {
 		conn, err := ln.Accept()
@@ -424,8 +428,8 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 		SendStatus(conn, StatusError)
 		return
 	}
-	if MaxBlobSize > 0 && int64(totalPlainLen) > MaxBlobSize {
-		fmt.Fprintf(os.Stderr, "upload rejected: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+	if serverMaxBlobSize > 0 && int64(totalPlainLen) > serverMaxBlobSize {
+		fmt.Fprintf(os.Stderr, "upload rejected: blob exceeds max size %d MB\n", serverMaxBlobSize/(1024*1024))
 		SendStatus(conn, StatusError)
 		return
 	}
@@ -487,10 +491,10 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 			return
 		}
 		plainCount += uint64(sealedLen - 16)
-		if MaxBlobSize > 0 && int64(plainCount) > MaxBlobSize {
+		if serverMaxBlobSize > 0 && int64(plainCount) > serverMaxBlobSize {
 			df.Close()
 			os.Remove(dataPath)
-			fmt.Fprintf(os.Stderr, "upload rejected mid-stream: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+			fmt.Fprintf(os.Stderr, "upload rejected mid-stream: blob exceeds max size %d MB\n", serverMaxBlobSize/(1024*1024))
 			SendStatus(conn, StatusError)
 			return
 		}
@@ -559,10 +563,10 @@ func handleSecureUpload(conn net.Conn, r io.Reader, st *store, serverID int) {
 		handleSecureUploadChunked(conn, r, st, serverID)
 		return
 	}
-	name, plaintextChecksum, nonce, sealed, err := ReadSecureUpload(r, MaxBlobSize)
+	name, plaintextChecksum, nonce, sealed, err := ReadSecureUpload(r, serverMaxBlobSize)
 	if err != nil {
 		if err == ErrBlobTooLarge {
-			fmt.Fprintf(os.Stderr, "secure upload rejected: blob exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+			fmt.Fprintf(os.Stderr, "secure upload rejected: blob exceeds max size %d MB\n", serverMaxBlobSize/(1024*1024))
 		} else if err != io.EOF {
 			fmt.Fprintf(os.Stderr, "read secure upload: %v\n", err)
 		}
@@ -601,8 +605,8 @@ func handleSecureUploadChunked(conn net.Conn, r io.Reader, st *store, serverID i
 		SendStatus(conn, StatusError)
 		return
 	}
-	if MaxBlobSize > 0 && int64(totalPlainLen) > MaxBlobSize {
-		fmt.Fprintf(os.Stderr, "secure chunked upload rejected: exceeds max size %d MB\n", MaxBlobSize/(1024*1024))
+	if serverMaxBlobSize > 0 && int64(totalPlainLen) > serverMaxBlobSize {
+		fmt.Fprintf(os.Stderr, "secure chunked upload rejected: exceeds max size %d MB\n", serverMaxBlobSize/(1024*1024))
 		SendStatus(conn, StatusError)
 		return
 	}

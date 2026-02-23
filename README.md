@@ -52,7 +52,7 @@ Domyślne wartości zmieniasz w zmiennych na początku pliku `main.go`:
 | Komenda | Opis |
 |--------|------|
 | `tcpraw server` | Uruchamia serwer (przechowuje zaszyfrowane bloby). |
-| `tcpraw servers` | Test wszystkich serwerów z listy: wolne miejsce, ~10 s test uploadu i downloadu, tabela wyników. |
+| `tcpraw servers` | Test wszystkich serwerów równocześnie: ping, wolne miejsce, ~10 s upload i download; tabela z wynikami. |
 | `tcpraw send` | Wysyła plik; generuje 6-cyfrowy kod, szyfruje, wypisuje kod. Opcja `-server=0..9`. |
 | `tcpraw secure send` | Wysyła plik z własnym kluczem 256-bit; serwer przypisuje kod. Opcja `-server=0..9`. |
 | `tcpraw get` | Pobiera plik po 6-cyfrowym kodzie (odszyfrowuje; dla secure – podaj klucz). |
@@ -194,7 +194,7 @@ Edit the variables at the top of `main.go` to change defaults:
 | Command | Description |
 |--------|-------------|
 | `tcpraw server` | Run the server (stores encrypted blobs). |
-| `tcpraw servers` | Test all servers from the list: free space, ~10s upload and download test, results table. |
+| `tcpraw servers` | Test all servers at once: ping, free space, ~10s upload and download; results table. |
 | `tcpraw send` | Upload a file; generates 6-digit code, encrypts, prints code. Option `-server=0..9`. |
 | `tcpraw secure send` | Upload with your own 256-bit key; server assigns code. Option `-server=0..9`. |
 | `tcpraw get` | Download by 6-digit code (decrypts; for secure uploads, provide key). |

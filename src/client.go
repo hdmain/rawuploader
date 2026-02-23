@@ -188,6 +188,14 @@ func (t *timeLimitReader) Read(p []byte) (n int, err error) {
 	return t.r.Read(p)
 }
 
+// countWriter counts bytes written (for measuring download throughput on client side).
+type countWriter int64
+
+func (c *countWriter) Write(p []byte) (n int, err error) {
+	*c += countWriter(len(p))
+	return len(p), nil
+}
+
 func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, free uint64, downloadBps, uploadBps float64, err error) {
 	pingStart := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
@@ -213,16 +221,22 @@ func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, fr
 		return 0, 0, 0, 0, err
 	}
 	pingMs = time.Since(pingStart).Seconds() * 1000
-	// Read exactly durationSec of stream so the next 8 bytes are serverTotal (use time-limited reader)
+	// Read durationSec of stream and count bytes (client-side throughput); then read 8-byte serverTotal to stay in sync
 	until := time.Now().Add(time.Duration(durationSec) * time.Second)
-	_, _ = io.Copy(io.Discard, &timeLimitReader{r: r, until: until})
+	var downCount countWriter
+	_, _ = io.Copy(&downCount, &timeLimitReader{r: r, until: until})
 	var serverTotal uint64
 	if err := binary.Read(r, binary.BigEndian, &serverTotal); err != nil {
 		return pingMs, free, 0, 0, err
 	}
 	downElapsed := time.Duration(durationSec) * time.Second
-	if serverTotal > 0 && downElapsed > 0 {
-		downloadBps = float64(serverTotal) / downElapsed.Seconds()
+	if downElapsed > 0 {
+		// Use client-side count (real received bytes); fallback to serverTotal if count is 0
+		if int64(downCount) > 0 {
+			downloadBps = float64(downCount) / downElapsed.Seconds()
+		} else if serverTotal > 0 {
+			downloadBps = float64(serverTotal) / downElapsed.Seconds()
+		}
 	}
 
 	if err := WriteBenchRequest(bw, 1, durationSec); err != nil {
@@ -288,6 +302,7 @@ func runClientServers() error {
 		return nil
 	}
 	fmt.Printf("Testing all %d servers at once (upload & download ~%ds each)...\n", len(servers), int(benchDurationSec))
+	fmt.Println("(N/A = server unreachable or older version without benchmark – update server and try again)")
 	results := make([]serverStats, len(servers))
 	var wg sync.WaitGroup
 	for i, srv := range servers {

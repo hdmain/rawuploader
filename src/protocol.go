@@ -17,6 +17,7 @@ const (
 	MsgDownload     = 'D'
 	MsgSecureUpload = 'S'
 	MsgTest         = 'T'
+	MsgBench        = 'B'
 )
 
 const TestPayloadSize = 256 * 1024 // 256 KB for bandwidth probe
@@ -155,6 +156,22 @@ func WriteTestRequest(w io.Writer, fileSize uint64) error {
 func ReadTestRequest(r io.Reader) (fileSize uint64, err error) {
 	err = binary.Read(r, binary.BigEndian, &fileSize)
 	return fileSize, err
+}
+
+// Bench: phase 0 = download (server sends), phase 1 = upload (client sends). Duration in seconds.
+func WriteBenchRequest(w io.Writer, phase byte, durationSec uint16) error {
+	if _, err := w.Write([]byte{phase}); err != nil {
+		return err
+	}
+	return binary.Write(w, binary.BigEndian, durationSec)
+}
+
+func ReadBenchRequest(r io.Reader) (phase byte, durationSec uint16, err error) {
+	var buf [3]byte
+	if _, err = io.ReadFull(r, buf[:]); err != nil {
+		return 0, 0, err
+	}
+	return buf[0], binary.BigEndian.Uint16(buf[1:3]), nil
 }
 
 func WriteSecureUploadChunkedHeader(w io.Writer, name string, totalPlainLen int64, numChunks uint32, plaintextChecksum []byte) error {

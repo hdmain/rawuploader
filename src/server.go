@@ -361,6 +361,8 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
 		handleSecureUpload(conn, r, st, serverID)
 	case MsgTest:
 		handleTest(conn, r, st)
+	case MsgBench:
+		handleBench(conn, r, st)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown type: %c\n", msgType)
 		SendStatus(conn, StatusError)
@@ -394,6 +396,71 @@ func handleTest(conn net.Conn, r io.Reader, st *store) {
 	}
 	// Client may close; we don't check fileSize vs free here, client does
 	_ = fileSize
+}
+
+func handleBench(conn net.Conn, r io.Reader, st *store) {
+	phase, durationSec, err := ReadBenchRequest(r)
+	if err != nil || durationSec < 1 || durationSec > 30 {
+		return
+	}
+	duration := time.Duration(durationSec) * time.Second
+	if phase == 0 {
+		// Download: server sends free, then stream for duration, then totalBytes
+		free, err := getDiskFreeSpace(st.DataDir())
+		if err != nil {
+			free = 0
+		}
+		if err := binary.Write(conn, binary.BigEndian, free); err != nil {
+			return
+		}
+		deadline := time.Now().Add(duration + 2*time.Second)
+		conn.SetWriteDeadline(deadline)
+		buf := make([]byte, 64*1024)
+		var total int64
+		stop := time.Now().Add(duration)
+		for time.Now().Before(stop) {
+			n, err := conn.Write(buf)
+			if err != nil {
+				return
+			}
+			total += int64(n)
+		}
+		conn.SetWriteDeadline(time.Time{})
+		if err := binary.Write(conn, binary.BigEndian, uint64(total)); err != nil {
+			return
+		}
+		// Next request: upload phase
+		phase2, dur2, err := ReadBenchRequest(r)
+		if err != nil || phase2 != 1 {
+			return
+		}
+		if dur2 < 1 || dur2 > 30 {
+			return
+		}
+		durationSec = dur2
+		phase = 1
+	}
+	if phase == 1 {
+		// Upload: server reads and discards for duration, then reads totalBytes, sends back
+		dur := time.Duration(durationSec) * time.Second
+		deadline := time.Now().Add(dur + 2*time.Second)
+		conn.SetReadDeadline(deadline)
+		until := time.Now().Add(dur)
+		buf := make([]byte, 64*1024)
+		for time.Now().Before(until) {
+			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			_, err := r.Read(buf)
+			if err != nil {
+				break
+			}
+		}
+		conn.SetReadDeadline(deadline)
+		var clientTotal uint64
+		if err := binary.Read(r, binary.BigEndian, &clientTotal); err != nil {
+			return
+		}
+		_ = binary.Write(conn, binary.BigEndian, clientTotal)
+	}
 }
 
 func handleUpload(conn net.Conn, r io.Reader, st *store) {

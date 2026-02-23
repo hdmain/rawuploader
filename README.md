@@ -47,14 +47,33 @@ Domyślne wartości zmieniasz w zmiennych na początku pliku `main.go`:
 | `RateLimitWindow`    | `10 * time.Minute`    | Okno czasowe limitu                        |
 | `BanDuration`        | `15 * time.Minute`    | Czas bana po przekroczeniu limitu          |
 
-### Komendy (tabela)
+### Komendy
 
-| Komenda | Opis | Opcje / argumenty |
-|--------|------|--------------------|
-| `tcpraw server` | Uruchamia serwer (przechowuje zaszyfrowane bloby). | `-id=0..9` id serwera (pierwsza cyfra kodu), `-port=9999`, `-dir=./data`, `-web=PORT` strona pobierania w przeglądarce, `-maxsize=MB` max rozmiar uploadu (0 = domyślny). |
-| `tcpraw send` | Wysyła plik; generuje 6-cyfrowy kod, szyfruje, wypisuje kod. | `-server=0..9` wybór serwera z listy (domyślnie: auto), `<plik>`, opcjonalnie `[host:port]`. |
-| `tcpraw secure send` | Wysyła plik z własnym kluczem 256-bit; serwer przypisuje kod. | `-server=0..9` wybór serwera, `<plik>`, opcjonalnie `[host:port]`. |
-| `tcpraw get` | Pobiera plik po 6-cyfrowym kodzie (odszyfrowuje; dla secure – podaj klucz). | `<6-cyfrowy-kod>`, `-o plik` nazwa zapisanego pliku. |
+| Komenda | Opis |
+|--------|------|
+| `tcpraw server` | Uruchamia serwer (przechowuje zaszyfrowane bloby). |
+| `tcpraw servers` | Test wszystkich serwerów z listy: wolne miejsce, ~10 s test uploadu i downloadu, tabela wyników. |
+| `tcpraw send` | Wysyła plik; generuje 6-cyfrowy kod, szyfruje, wypisuje kod. Opcja `-server=0..9`. |
+| `tcpraw secure send` | Wysyła plik z własnym kluczem 256-bit; serwer przypisuje kod. Opcja `-server=0..9`. |
+| `tcpraw get` | Pobiera plik po 6-cyfrowym kodzie (odszyfrowuje; dla secure – podaj klucz). |
+
+### Argumenty i opcje
+
+| Komenda | Argument / opcja | Opis |
+|--------|-------------------|------|
+| `tcpraw server` | `-id=0..9` | Id serwera (pierwsza cyfra generowanych kodów); domyślnie 0. |
+| `tcpraw server` | `-port=PORT` | Port TCP (domyślnie 9999). |
+| `tcpraw server` | `-dir=ŚCIEŻKA` | Katalog na bloby (domyślnie `./data`). |
+| `tcpraw server` | `-web=PORT` | Port HTTP strony pobierania w przeglądarce; pomiń = wyłączone. |
+| `tcpraw server` | `-maxsize=MB` | Maks. rozmiar uploadu w MB (0 = domyślna wartość z kodu). |
+| `tcpraw send` | `-server=0..9` | Użyj serwera o podanym id z listy (domyślnie: auto). |
+| `tcpraw send` | `<plik>` | Ścieżka do pliku do wysłania. |
+| `tcpraw send` | `[host:port]` | Opcjonalnie: adres serwera (nadpisuje listę). |
+| `tcpraw secure send` | `-server=0..9` | Użyj serwera o podanym id z listy (domyślnie: auto). |
+| `tcpraw secure send` | `<plik>` | Ścieżka do pliku do wysłania. |
+| `tcpraw secure send` | `[host:port]` | Opcjonalnie: adres serwera (nadpisuje listę). |
+| `tcpraw get` | `<6-cyfrowy-kod>` | Kod zwrócony przy wysyłce. |
+| `tcpraw get` | `-o plik` | Nazwa zapisanego pliku (domyślnie: z serwera). |
 
 ### Użycie
 
@@ -83,15 +102,15 @@ Dane są zapisywane na dysku. Przy starcie usuwane są stare i wygasłe bloby.
 **Send (wysyłanie):**
 
 ```bash
-tcpraw send <plik> [host:port]
+tcpraw send [-server=0..9] <plik> [host:port]
 ```
 
-Wysyła plik, szyfruje go nowym 6-cyfrowym kodem i wypisuje kod. Serwer jest wybierany z listy adresów (pierwsza cyfra kodu = id serwera). Opcjonalnie `host:port` nadpisuje adres.
+Wysyła plik, szyfruje go nowym 6-cyfrowym kodem i wypisuje kod. Opcja `-server=0..9` wybiera serwer z listy (domyślnie: auto). Serwer jest wybierany z listy adresów (pierwsza cyfra kodu = id serwera). Opcjonalnie `host:port` nadpisuje adres.
 
 **Secure send (wysyłanie z własnym kluczem):**
 
 ```bash
-tcpraw secure send <plik> [host:port]
+tcpraw secure send [-server=0..9] <plik> [host:port]
 ```
 
 Szyfruje plik 256-bitowym kluczem (generowanym przez klienta). Serwer przypisuje 6-cyfrowy kod i przechowuje dane zaszyfrowane; **klucza nie zna**. Po uploadzie dostajesz kod i klucz (64 znaki hex) – bez klucza pliku nie da się odszyfrować. Dla plików &gt;500 MB dane są strumieniowane (w RAM nie więcej niż ~500 MB).
@@ -170,14 +189,33 @@ Edit the variables at the top of `main.go` to change defaults:
 | `RateLimitWindow`    | `10 * time.Minute`   | Rate limit window                    |
 | `BanDuration`        | `15 * time.Minute`   | Ban duration when limit exceeded     |
 
-### Commands (table)
+### Commands
 
-| Command | Description | Options / arguments |
-|--------|-------------|---------------------|
-| `tcpraw server` | Run the server (stores encrypted blobs). | `-id=0..9` server id (first digit of code), `-port=9999`, `-dir=./data`, `-web=PORT` browser download page, `-maxsize=MB` max upload size (0 = default). |
-| `tcpraw send` | Upload a file; generates 6-digit code, encrypts, prints code. | `-server=0..9` pick server from list (default: auto), `<file>`, optional `[host:port]`. |
-| `tcpraw secure send` | Upload with your own 256-bit key; server assigns code. | `-server=0..9` pick server, `<file>`, optional `[host:port]`. |
-| `tcpraw get` | Download by 6-digit code (decrypts; for secure uploads, provide key). | `<6-digit-code>`, `-o file` output filename. |
+| Command | Description |
+|--------|-------------|
+| `tcpraw server` | Run the server (stores encrypted blobs). |
+| `tcpraw servers` | Test all servers from the list: free space, ~10s upload and download test, results table. |
+| `tcpraw send` | Upload a file; generates 6-digit code, encrypts, prints code. Option `-server=0..9`. |
+| `tcpraw secure send` | Upload with your own 256-bit key; server assigns code. Option `-server=0..9`. |
+| `tcpraw get` | Download by 6-digit code (decrypts; for secure uploads, provide key). |
+
+### Arguments and options
+
+| Command | Argument / option | Description |
+|--------|-------------------|-------------|
+| `tcpraw server` | `-id=0..9` | Server id (first digit of generated codes); default 0. |
+| `tcpraw server` | `-port=PORT` | TCP port (default 9999). |
+| `tcpraw server` | `-dir=PATH` | Directory for blobs (default `./data`). |
+| `tcpraw server` | `-web=PORT` | HTTP port for browser download page; omit = disabled. |
+| `tcpraw server` | `-maxsize=MB` | Max upload size in MB (0 = default from code). |
+| `tcpraw send` | `-server=0..9` | Use server with that id from list (default: auto). |
+| `tcpraw send` | `<file>` | Path to file to upload. |
+| `tcpraw send` | `[host:port]` | Optional: server address (overrides list). |
+| `tcpraw secure send` | `-server=0..9` | Use server with that id from list (default: auto). |
+| `tcpraw secure send` | `<file>` | Path to file to upload. |
+| `tcpraw secure send` | `[host:port]` | Optional: server address (overrides list). |
+| `tcpraw get` | `<6-digit-code>` | Code returned when uploading. |
+| `tcpraw get` | `-o file` | Output filename (default: from server). |
 
 ### Usage
 
@@ -206,15 +244,15 @@ Data is stored on disk. On startup, orphan and expired blobs are removed.
 **Send (upload):**
 
 ```bash
-tcpraw send <file> [host:port]
+tcpraw send [-server=0..9] <file> [host:port]
 ```
 
-Uploads the file, encrypts it with a new 6-digit code, and prints the code. Server is chosen from the address list (first digit of code = server id). Optionally `host:port` overrides the address.
+Uploads the file, encrypts it with a new 6-digit code. Option `-server=0..9` picks server from list (default: auto)., and prints the code. Server is chosen from the address list (first digit of code = server id). Optionally `host:port` overrides the address.
 
 **Secure send (upload with your own key):**
 
 ```bash
-tcpraw secure send <file> [host:port]
+tcpraw secure send [-server=0..9] <file> [host:port]
 ```
 
 Encrypts the file with a 256-bit key (generated by the client). The server assigns the 6-digit code and stores data encrypted; **it never sees the key**. After upload you get the code and the key (64 hex chars) – without the key the file cannot be decrypted. For files &gt;500 MB data is streamed (no more than ~500 MB in RAM).

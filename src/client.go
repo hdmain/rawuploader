@@ -163,6 +163,91 @@ func tryServersFromList(fileSize int64) (net.Conn, int, error) {
 	return conn, best.serverID, nil
 }
 
+const benchDurationSec uint16 = 10
+
+type serverStats struct {
+	id          int
+	addr        string
+	free        uint64
+	downloadBps float64
+	uploadBps   float64
+	ok          bool
+}
+
+func runServerBench(addr string, id int, durationSec uint16) (free uint64, downloadBps, uploadBps float64, err error) {
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer conn.Close()
+	setTCPBuffers(conn)
+	conn.SetDeadline(time.Now().Add(time.Duration(durationSec)*2*time.Second + 15*time.Second))
+
+	bw := bufio.NewWriterSize(conn, 256*1024)
+	if err := WriteMessageType(bw, MsgBench); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := WriteBenchRequest(bw, 0, durationSec); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := bw.Flush(); err != nil {
+		return 0, 0, 0, err
+	}
+	r := bufio.NewReaderSize(conn, 256*1024)
+	if err := binary.Read(r, binary.BigEndian, &free); err != nil {
+		return 0, 0, 0, err
+	}
+	until := time.Now().Add(time.Duration(durationSec) * time.Second)
+	var downTotal int64
+	buf := make([]byte, 64*1024)
+	for time.Now().Before(until) {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := r.Read(buf)
+		if n > 0 {
+			downTotal += int64(n)
+		}
+		if err != nil {
+			break
+		}
+	}
+	var serverTotal uint64
+	if err := binary.Read(r, binary.BigEndian, &serverTotal); err != nil {
+		return 0, 0, 0, err
+	}
+	downElapsed := time.Duration(durationSec) * time.Second
+	if serverTotal > 0 {
+		downloadBps = float64(serverTotal) / downElapsed.Seconds()
+	}
+
+	if err := WriteBenchRequest(bw, 1, durationSec); err != nil {
+		return free, downloadBps, 0, nil
+	}
+	if err := bw.Flush(); err != nil {
+		return free, downloadBps, 0, nil
+	}
+	until = time.Now().Add(time.Duration(durationSec) * time.Second)
+	randBuf := make([]byte, 64*1024)
+	var upTotal int64
+	for time.Now().Before(until) {
+		n, _ := bw.Write(randBuf)
+		if n > 0 {
+			upTotal += int64(n)
+		}
+	}
+	if err := bw.Flush(); err != nil {
+		return free, downloadBps, 0, nil
+	}
+	if err := binary.Write(conn, binary.BigEndian, uint64(upTotal)); err != nil {
+		return free, downloadBps, 0, nil
+	}
+	var ack uint64
+	if err := binary.Read(r, binary.BigEndian, &ack); err != nil {
+		return free, downloadBps, 0, nil
+	}
+	uploadBps = float64(upTotal) / time.Duration(durationSec).Seconds()
+	return free, downloadBps, uploadBps, nil
+}
+
 // getServerFreeSpace returns free disk space (bytes) for one server, or 0 on failure.
 func getServerFreeSpace(addr string) uint64 {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -179,6 +264,51 @@ func getServerFreeSpace(addr string) uint64 {
 		return 0
 	}
 	return free
+}
+
+func runClientServers() error {
+	addrs, err := fetchServerList()
+	if err != nil {
+		return fmt.Errorf("fetch server list: %w", err)
+	}
+	var results []serverStats
+	for id, addr := range addrs {
+		if addr == "" {
+			continue
+		}
+		fmt.Printf("Testing server %d (%s) – upload & download ~%ds...\n", id, addr, int(benchDurationSec))
+		free, downBps, upBps, err := runServerBench(addr, id, benchDurationSec)
+		if err != nil {
+			fmt.Printf("  error: %v\n", err)
+			results = append(results, serverStats{id: id, addr: addr, ok: false})
+			continue
+		}
+		results = append(results, serverStats{
+			id: id, addr: addr, free: free,
+			downloadBps: downBps, uploadBps: upBps, ok: true,
+		})
+	}
+	if len(results) == 0 {
+		fmt.Println("No servers in list.")
+		return nil
+	}
+	const gb = 1024 * 1024 * 1024
+	const mb = 1024 * 1024
+	fmt.Println()
+	fmt.Printf("%-4s %-24s %12s %14s %14s\n", "ID", "Address", "Free", "Download", "Upload")
+	fmt.Printf("%-4s %-24s %12s %14s %14s\n", "--", "-------", "----", "--------", "------")
+	for _, s := range results {
+		freeStr := "N/A"
+		downStr := "N/A"
+		upStr := "N/A"
+		if s.ok {
+			freeStr = fmt.Sprintf("%.2f GB", float64(s.free)/float64(gb))
+			downStr = fmt.Sprintf("%.2f MB/s", s.downloadBps/float64(mb))
+			upStr = fmt.Sprintf("%.2f MB/s", s.uploadBps/float64(mb))
+		}
+		fmt.Printf("%-4d %-24s %12s %14s %14s\n", s.id, s.addr, freeStr, downStr, upStr)
+	}
+	return nil
 }
 
 // getTotalNetworkStorage returns sum of free disk space (bytes) across all servers from the list. Timeout applies to the whole operation.

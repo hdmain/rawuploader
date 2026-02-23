@@ -163,7 +163,7 @@ func tryServersFromList(fileSize int64) (net.Conn, int, error) {
 	return conn, best.serverID, nil
 }
 
-const benchDurationSec uint16 = 10
+const benchDurationSec uint16 = 2
 
 type serverStats struct {
 	id          int
@@ -301,26 +301,22 @@ func runClientServers() error {
 		fmt.Println("No servers in list.")
 		return nil
 	}
-	fmt.Printf("Testing all %d servers at once (upload & download ~%ds each)...\n", len(servers), int(benchDurationSec))
+	fmt.Printf("Testing each server (2s download, 2s upload)...\n")
 	fmt.Println("(N/A = server unreachable or older version without benchmark – update server and try again)")
-	results := make([]serverStats, len(servers))
-	var wg sync.WaitGroup
-	for i, srv := range servers {
-		wg.Add(1)
-		go func(i int, id int, addr string) {
-			defer wg.Done()
-			pingMs, free, downBps, upBps, err := runServerBench(addr, id, benchDurationSec)
-			if err != nil {
-				results[i] = serverStats{id: id, addr: addr, ok: false}
-				return
-			}
-			results[i] = serverStats{
-				id: id, addr: addr, pingMs: pingMs, free: free,
-				downloadBps: downBps, uploadBps: upBps, ok: true,
-			}
-		}(i, srv.id, srv.addr)
+	var results []serverStats
+	for _, srv := range servers {
+		fmt.Printf("  Server %d (%s)...\n", srv.id, srv.addr)
+		pingMs, free, downBps, upBps, err := runServerBench(srv.addr, srv.id, benchDurationSec)
+		if err != nil {
+			fmt.Printf("    error: %v\n", err)
+			results = append(results, serverStats{id: srv.id, addr: srv.addr, ok: false})
+			continue
+		}
+		results = append(results, serverStats{
+			id: srv.id, addr: srv.addr, pingMs: pingMs, free: free,
+			downloadBps: downBps, uploadBps: upBps, ok: true,
+		})
 	}
-	wg.Wait()
 	const gb = 1024 * 1024 * 1024
 	const mb = 1024 * 1024
 	fmt.Println()

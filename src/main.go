@@ -251,7 +251,7 @@ func printUsage() {
 	fmt.Println("tcpraw – TCP file send/receive; client generates 6-digit code, data encrypted on server")
 	fmt.Println()
 	fmt.Println("  server  – listen for uploads; store encrypted data")
-	fmt.Println("  servers – test all servers: free space, ~10s upload & download speed")
+	fmt.Println("  servers – test each server: ping, free space, 2s download & 2s upload")
 	fmt.Println("  send    – generate code, encrypt file, upload; you get the 6-digit code")
 	fmt.Println("  get     – download by code; decrypt with same code (or with key for secure uploads)")
 	fmt.Println("  secure send – encrypt with your own 256-bit key; server assigns code; use get + key to download")
@@ -264,7 +264,7 @@ func printUsage() {
 	fmt.Println("  tcpraw send [-server=0-9] <file> [host:port]   (-server = use that server id; host:port = override)")
 	fmt.Println("  tcpraw secure send [-server=0-9] <file> [host:port]")
 	fmt.Println("  tcpraw get <6-digit-code> [-o file]")
-	fmt.Println("  tcpraw servers   (benchmark all servers, ~10s upload+download each)")
+	fmt.Println("  tcpraw servers   (benchmark each server: 2s download, 2s upload)")
 	fmt.Println()
 	fmt.Println("Servers are read from the address list (first digit of code = server id).")
 	fmt.Printf("Data kept %v, cleanup every %v, max upload %d MB, rate limit %d codes/%v then %v ban\n",

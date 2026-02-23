@@ -253,6 +253,9 @@ func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, fr
 		if n > 0 {
 			upTotal += int64(n)
 		}
+		if err := bw.Flush(); err != nil {
+			break
+		}
 	}
 	if err := bw.Flush(); err != nil {
 		return pingMs, free, downloadBps, 0, nil
@@ -264,7 +267,15 @@ func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, fr
 	if err := binary.Read(r, binary.BigEndian, &ack); err != nil {
 		return pingMs, free, downloadBps, 0, nil
 	}
-	uploadBps = float64(upTotal) / time.Duration(durationSec).Seconds()
+	sec := time.Duration(durationSec).Seconds()
+	if sec > 0 {
+		// Use our sent count; if 0, use server ack (bytes server received)
+		if upTotal > 0 {
+			uploadBps = float64(upTotal) / sec
+		} else if ack > 0 {
+			uploadBps = float64(ack) / sec
+		}
+	}
 	return pingMs, free, downloadBps, uploadBps, nil
 }
 

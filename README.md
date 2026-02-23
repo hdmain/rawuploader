@@ -47,6 +47,15 @@ Domyślne wartości zmieniasz w zmiennych na początku pliku `main.go`:
 | `RateLimitWindow`    | `10 * time.Minute`    | Okno czasowe limitu                        |
 | `BanDuration`        | `15 * time.Minute`    | Czas bana po przekroczeniu limitu          |
 
+### Komendy (tabela)
+
+| Komenda | Opis | Opcje / argumenty |
+|--------|------|--------------------|
+| `tcpraw server` | Uruchamia serwer (przechowuje zaszyfrowane bloby). | `-id=0..9` id serwera (pierwsza cyfra kodu), `-port=9999`, `-dir=./data`, `-web=PORT` strona pobierania w przeglądarce, `-maxsize=MB` max rozmiar uploadu (0 = domyślny). |
+| `tcpraw send` | Wysyła plik; generuje 6-cyfrowy kod, szyfruje, wypisuje kod. | `-server=0..9` wybór serwera z listy (domyślnie: auto), `<plik>`, opcjonalnie `[host:port]`. |
+| `tcpraw secure send` | Wysyła plik z własnym kluczem 256-bit; serwer przypisuje kod. | `-server=0..9` wybór serwera, `<plik>`, opcjonalnie `[host:port]`. |
+| `tcpraw get` | Pobiera plik po 6-cyfrowym kodzie (odszyfrowuje; dla secure – podaj klucz). | `<6-cyfrowy-kod>`, `-o plik` nazwa zapisanego pliku. |
+
 ### Użycie
 
 **Serwer:**
@@ -63,9 +72,11 @@ tcpraw server -port=9999 -dir=./data -web=8080
 
 Następnie otwórz `http://SERVER:8080` i wpisz 6-cyfrowy kod, żeby pobrać plik.
 
+- **-id** – Id serwera 0–9 (pierwsza cyfra generowanych kodów); domyślnie 0.
 - **-port** – Port TCP protokołu tcpraw (domyślnie 9999).
 - **-dir** – Katalog na zaszyfrowane bloby (domyślnie `./data`).
 - **-web** – Port HTTP strony pobierania; pomiń, żeby wyłączyć.
+- **-maxsize** – Maks. rozmiar uploadu w MB (0 = domyślna wartość z kodu).
 
 Dane są zapisywane na dysku. Przy starcie usuwane są stare i wygasłe bloby.
 
@@ -159,6 +170,15 @@ Edit the variables at the top of `main.go` to change defaults:
 | `RateLimitWindow`    | `10 * time.Minute`   | Rate limit window                    |
 | `BanDuration`        | `15 * time.Minute`   | Ban duration when limit exceeded     |
 
+### Commands (table)
+
+| Command | Description | Options / arguments |
+|--------|-------------|---------------------|
+| `tcpraw server` | Run the server (stores encrypted blobs). | `-id=0..9` server id (first digit of code), `-port=9999`, `-dir=./data`, `-web=PORT` browser download page, `-maxsize=MB` max upload size (0 = default). |
+| `tcpraw send` | Upload a file; generates 6-digit code, encrypts, prints code. | `-server=0..9` pick server from list (default: auto), `<file>`, optional `[host:port]`. |
+| `tcpraw secure send` | Upload with your own 256-bit key; server assigns code. | `-server=0..9` pick server, `<file>`, optional `[host:port]`. |
+| `tcpraw get` | Download by 6-digit code (decrypts; for secure uploads, provide key). | `<6-digit-code>`, `-o file` output filename. |
+
 ### Usage
 
 **Server:**
@@ -175,9 +195,11 @@ tcpraw server -port=9999 -dir=./data -web=8080
 
 Then open `http://SERVER:8080` and enter the 6-digit code to download.
 
+- **-id** – Server id 0–9 (first digit of generated codes); default 0.
 - **-port** – TCP port for the tcpraw protocol (default 9999).
 - **-dir** – Directory for stored encrypted blobs (default `./data`).
 - **-web** – HTTP port for the download page; omit to disable.
+- **-maxsize** – Max upload size in MB (0 = default from code).
 
 Data is stored on disk. On startup, orphan and expired blobs are removed.
 

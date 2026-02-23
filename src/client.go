@@ -263,7 +263,7 @@ func generateCodeWithServerID(serverID int) string {
 	return fmt.Sprintf("%d%05d", serverID, rand.Intn(100000))
 }
 
-func runClientSend(filePath string, addr string) error {
+func runClientSend(filePath string, addr string, serverIDHint int) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
@@ -305,6 +305,21 @@ func runClientSend(filePath string, addr string) error {
 			return err
 		}
 		serverID = 0
+	} else if serverIDHint >= 0 && serverIDHint <= 9 {
+		addrs, fetchErr := fetchServerList()
+		if fetchErr != nil {
+			return fmt.Errorf("fetch server list: %w", fetchErr)
+		}
+		if addrs[serverIDHint] == "" {
+			return fmt.Errorf("server %d not in list", serverIDHint)
+		}
+		var err error
+		conn, err = net.DialTimeout("tcp", addrs[serverIDHint], dialTimeout)
+		if err != nil {
+			return err
+		}
+		setTCPBuffers(conn)
+		serverID = serverIDHint
 	} else {
 		fmt.Println("info: probing servers (disk space + bandwidth, max 1s)...")
 		var err error
@@ -372,7 +387,7 @@ func runClientSend(filePath string, addr string) error {
 	}
 }
 
-func runClientSecureSend(filePath string, addr string) error {
+func runClientSecureSend(filePath string, addr string, serverIDHint int) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
@@ -398,6 +413,19 @@ func runClientSecureSend(filePath string, addr string) error {
 	var conn net.Conn
 	if addr != "" {
 		conn, err = dialWithFallback(addr)
+	} else if serverIDHint >= 0 && serverIDHint <= 9 {
+		addrs, fetchErr := fetchServerList()
+		if fetchErr != nil {
+			return fmt.Errorf("fetch server list: %w", fetchErr)
+		}
+		if addrs[serverIDHint] == "" {
+			return fmt.Errorf("server %d not in list", serverIDHint)
+		}
+		conn, err = net.DialTimeout("tcp", addrs[serverIDHint], dialTimeout)
+		if err != nil {
+			return err
+		}
+		setTCPBuffers(conn)
 	} else {
 		fmt.Println("info: probing servers (disk space + bandwidth, max 1s)...")
 		conn, _, err = tryServersFromList(size)

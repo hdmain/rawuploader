@@ -12,6 +12,44 @@ import (
 	"time"
 )
 
+type secureSendArgs struct {
+	file     string
+	addr     string
+	serverID int
+}
+
+func parseSecureSendArgs(raw []string) secureSendArgs {
+	var out secureSendArgs
+	out.serverID = -1
+	var positional []string
+	for i := 0; i < len(raw); i++ {
+		s := raw[i]
+		if s == "-server" && i+1 < len(raw) {
+			id, _ := strconv.Atoi(raw[i+1])
+			if id >= 0 && id <= 9 {
+				out.serverID = id
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(s, "-server=") {
+			id, _ := strconv.Atoi(strings.TrimPrefix(s, "-server="))
+			if id >= 0 && id <= 9 {
+				out.serverID = id
+			}
+			continue
+		}
+		positional = append(positional, s)
+	}
+	if len(positional) >= 1 {
+		out.file = positional[0]
+	}
+	if len(positional) >= 2 {
+		out.addr = positional[1]
+	}
+	return out
+}
+
 const versionURL = "https://raw.githubusercontent.com/hdmain/rawuploader/main/version"
 
 // Version – change only here; remote check uses GitHub raw version file.
@@ -35,6 +73,7 @@ func main() {
 	serverMaxSizeMB := serverCmd.Int64("maxsize", 0, "max upload size in MB (0 = use default from code)")
 
 	clientSendCmd := flag.NewFlagSet("send", flag.ExitOnError)
+	clientSendServerID := clientSendCmd.Int("server", -1, "server id 0–9 to use (default: auto-probe)")
 	clientGetCmd := flag.NewFlagSet("get", flag.ExitOnError)
 	clientGetOut := clientGetCmd.String("o", "", "output file (default: name from server)")
 
@@ -72,7 +111,7 @@ func main() {
 		if len(args) >= 2 {
 			addr = args[1]
 		}
-		if err := runClientSend(args[0], addr); err != nil {
+		if err := runClientSend(args[0], addr, *clientSendServerID); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -120,16 +159,12 @@ func main() {
 			printVersionCheck()
 			os.Exit(1)
 		}
-		args := os.Args[3:]
-		if len(args) < 1 {
+		args := parseSecureSendArgs(os.Args[3:])
+		if args.file == "" {
 			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file> [host:port]")
 			os.Exit(1)
 		}
-		addr := ""
-		if len(args) >= 2 {
-			addr = args[1]
-		}
-		if err := runClientSecureSend(args[0], addr); err != nil {
+		if err := runClientSecureSend(args.file, args.addr, args.serverID); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -220,8 +255,8 @@ func printUsage() {
 	fmt.Println("    -id=ID       server id 0–9 (first digit of generated codes); default 0")
 	fmt.Println("    -web=PORT    serve download page in browser (no client needed)")
 	fmt.Println("    -maxsize=MB  max upload size in MB (0 = default from code)")
-	fmt.Println("  tcpraw send <file> [host:port]   (host:port = server not on list)")
-	fmt.Println("  tcpraw secure send <file> [host:port]")
+	fmt.Println("  tcpraw send [-server=0-9] <file> [host:port]   (-server = use that server id; host:port = override)")
+	fmt.Println("  tcpraw secure send [-server=0-9] <file> [host:port]")
 	fmt.Println("  tcpraw get <6-digit-code> [-o file]")
 	fmt.Println()
 	fmt.Println("Servers are read from the address list (first digit of code = server id).")

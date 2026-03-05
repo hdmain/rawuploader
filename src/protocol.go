@@ -33,6 +33,9 @@ const CodeLength = 6
 
 const FileChunkSize = 256 * 1024
 
+// Long-term storage: max 150 MB, duration sent as uint32 seconds (0 = default 30 min).
+const LongTermMaxBytes = 150 * 1024 * 1024
+
 type EncryptedChunk struct {
 	Nonce  [12]byte
 	Sealed []byte
@@ -174,7 +177,7 @@ func ReadBenchRequest(r io.Reader) (phase byte, durationSec uint16, err error) {
 	return buf[0], binary.BigEndian.Uint16(buf[1:3]), nil
 }
 
-func WriteSecureUploadChunkedHeader(w io.Writer, name string, totalPlainLen int64, numChunks uint32, plaintextChecksum []byte) error {
+func WriteSecureUploadChunkedHeader(w io.Writer, name string, totalPlainLen int64, storageDurationSec uint32, numChunks uint32, plaintextChecksum []byte) error {
 	nameBytes := []byte(name)
 	if len(nameBytes) > 0xFFFF {
 		nameBytes = nameBytes[:0xFFFF]
@@ -186,6 +189,9 @@ func WriteSecureUploadChunkedHeader(w io.Writer, name string, totalPlainLen int6
 		return err
 	}
 	if err := binary.Write(w, binary.BigEndian, uint64(totalPlainLen)); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, storageDurationSec); err != nil {
 		return err
 	}
 	if err := binary.Write(w, binary.BigEndian, numChunks); err != nil {
@@ -213,27 +219,30 @@ func WriteChunk(w io.Writer, nonce, sealed []byte) error {
 	return nil
 }
 
-func ReadSecureUploadChunkedHeader(r io.Reader) (name string, totalPlainLen uint64, numChunks uint32, plaintextChecksum []byte, err error) {
+func ReadSecureUploadChunkedHeader(r io.Reader) (name string, totalPlainLen uint64, storageDurationSec uint32, numChunks uint32, plaintextChecksum []byte, err error) {
 	var nameLen uint16
 	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
-		return "", 0, 0, nil, err
+		return "", 0, 0, 0, nil, err
 	}
 	nameBuf := make([]byte, nameLen)
 	if _, err = io.ReadFull(r, nameBuf); err != nil {
-		return "", 0, 0, nil, err
+		return "", 0, 0, 0, nil, err
 	}
 	name = string(nameBuf)
 	if err = binary.Read(r, binary.BigEndian, &totalPlainLen); err != nil {
-		return "", 0, 0, nil, err
+		return "", 0, 0, 0, nil, err
+	}
+	if err = binary.Read(r, binary.BigEndian, &storageDurationSec); err != nil {
+		return "", 0, 0, 0, nil, err
 	}
 	if err = binary.Read(r, binary.BigEndian, &numChunks); err != nil {
-		return "", 0, 0, nil, err
+		return "", 0, 0, 0, nil, err
 	}
 	plaintextChecksum = make([]byte, sha256.Size)
 	if _, err = io.ReadFull(r, plaintextChecksum); err != nil {
-		return "", 0, 0, nil, err
+		return "", 0, 0, 0, nil, err
 	}
-	return name, totalPlainLen, numChunks, plaintextChecksum, nil
+	return name, totalPlainLen, storageDurationSec, numChunks, plaintextChecksum, nil
 }
 
 func ReadChunkRaw(r io.Reader) (nonce []byte, sealed []byte, err error) {
@@ -413,7 +422,7 @@ func ReadEncryptedUpload(r io.Reader, maxSealed int64) (code string, name string
 	return code, name, plaintextChecksum, nonce, sealed, nil
 }
 
-func WriteEncryptedUploadChunked(w io.Writer, code string, name string, totalPlainLen int64, numChunks uint32, plaintextChecksum []byte, getChunk func() ([]byte, error), progress ProgressFunc) error {
+func WriteEncryptedUploadChunked(w io.Writer, code string, name string, totalPlainLen int64, storageDurationSec uint32, numChunks uint32, plaintextChecksum []byte, getChunk func() ([]byte, error), progress ProgressFunc) error {
 	if len(code) != CodeLength || len(plaintextChecksum) != sha256.Size {
 		return nil
 	}
@@ -431,6 +440,9 @@ func WriteEncryptedUploadChunked(w io.Writer, code string, name string, totalPla
 		return err
 	}
 	if err := binary.Write(w, binary.BigEndian, uint64(totalPlainLen)); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, storageDurationSec); err != nil {
 		return err
 	}
 	if err := binary.Write(w, binary.BigEndian, numChunks); err != nil {
@@ -469,53 +481,56 @@ func WriteEncryptedUploadChunked(w io.Writer, code string, name string, totalPla
 	return nil
 }
 
-func ReadEncryptedUploadChunked(r io.Reader, maxTotalPlain int64) (code string, name string, plaintextChecksum []byte, chunks []EncryptedChunk, err error) {
+func ReadEncryptedUploadChunked(r io.Reader, maxTotalPlain int64) (code string, name string, storageDurationSec uint32, plaintextChecksum []byte, chunks []EncryptedChunk, err error) {
 	codeBuf := make([]byte, CodeLength)
 	if _, err = io.ReadFull(r, codeBuf); err != nil {
-		return "", "", nil, nil, err
+		return "", "", 0, nil, nil, err
 	}
 	code = string(codeBuf)
 	var nameLen uint16
 	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
-		return "", "", nil, nil, err
+		return "", "", 0, nil, nil, err
 	}
 	nameBuf := make([]byte, nameLen)
 	if _, err = io.ReadFull(r, nameBuf); err != nil {
-		return "", "", nil, nil, err
+		return "", "", 0, nil, nil, err
 	}
 	name = string(nameBuf)
 	var totalPlainLen uint64
 	if err = binary.Read(r, binary.BigEndian, &totalPlainLen); err != nil {
-		return "", "", nil, nil, err
+		return "", "", 0, nil, nil, err
 	}
 	if maxTotalPlain > 0 && int64(totalPlainLen) > maxTotalPlain {
-		return "", "", nil, nil, ErrBlobTooLarge
+		return "", "", 0, nil, nil, ErrBlobTooLarge
+	}
+	if err = binary.Read(r, binary.BigEndian, &storageDurationSec); err != nil {
+		return "", "", 0, nil, nil, err
 	}
 	var numChunks uint32
 	if err = binary.Read(r, binary.BigEndian, &numChunks); err != nil {
-		return "", "", nil, nil, err
+		return "", "", 0, nil, nil, err
 	}
 	plaintextChecksum = make([]byte, sha256.Size)
 	if _, err = io.ReadFull(r, plaintextChecksum); err != nil {
-		return "", "", nil, nil, err
+		return "", "", 0, nil, nil, err
 	}
 	chunks = make([]EncryptedChunk, 0, numChunks)
 	for i := uint32(0); i < numChunks; i++ {
 		var c EncryptedChunk
 		if _, err = io.ReadFull(r, c.Nonce[:]); err != nil {
-			return "", "", nil, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		var sealedLen uint32
 		if err = binary.Read(r, binary.BigEndian, &sealedLen); err != nil {
-			return "", "", nil, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		c.Sealed = make([]byte, sealedLen)
 		if _, err = io.ReadFull(r, c.Sealed); err != nil {
-			return "", "", nil, nil, err
+			return "", "", 0, nil, nil, err
 		}
 		chunks = append(chunks, c)
 	}
-	return code, name, plaintextChecksum, chunks, nil
+	return code, name, storageDurationSec, plaintextChecksum, chunks, nil
 }
 
 func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonce, sealed []byte, progress ProgressFunc) error {

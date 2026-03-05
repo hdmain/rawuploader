@@ -67,12 +67,16 @@ type StoredBlob struct {
 	Chunked           bool
 	Secure            bool
 	CreatedAt         time.Time
+	ExpiresAt         time.Time // zero = use server default duration from CreatedAt
 }
 
 const indexFilename = ".index.gob"
 
 // serverMaxBlobSize is set at runServer start; handlers use it for upload size limit.
 var serverMaxBlobSize int64
+
+// serverLongTerm enables long-term storage (client can request e.g. 7d; max 150 MB).
+var serverLongTerm bool
 
 type store struct {
 	mu               sync.RWMutex
@@ -186,12 +190,9 @@ func (s *store) put(code string, b *StoredBlob) error {
 
 func (s *store) get(code string) (*StoredBlob, bool) {
 	s.mu.RLock()
-	createdAt, ok := s.index[code]
+	_, ok := s.index[code]
 	s.mu.RUnlock()
 	if !ok {
-		return nil, false
-	}
-	if time.Since(createdAt) > s.storageDuration {
 		return nil, false
 	}
 	f, err := os.Open(s.blobPath(code))
@@ -201,6 +202,13 @@ func (s *store) get(code string) (*StoredBlob, bool) {
 	defer f.Close()
 	var b StoredBlob
 	if err := gob.NewDecoder(f).Decode(&b); err != nil {
+		return nil, false
+	}
+	expiry := b.ExpiresAt
+	if expiry.IsZero() {
+		expiry = b.CreatedAt.Add(s.storageDuration)
+	}
+	if time.Now().After(expiry) {
 		return nil, false
 	}
 	return &b, true
@@ -218,22 +226,42 @@ func (s *store) remove(code string) {
 }
 
 func (s *store) cleanupExpired() {
-	s.mu.Lock()
-	cutoff := time.Now().Add(-s.storageDuration)
+	s.mu.RLock()
+	codes := make([]string, 0, len(s.index))
+	for code := range s.index {
+		codes = append(codes, code)
+	}
+	s.mu.RUnlock()
 	var expired []string
-	for code, createdAt := range s.index {
-		if createdAt.Before(cutoff) {
+	for _, code := range codes {
+		f, err := os.Open(s.blobPath(code))
+		if err != nil {
+			expired = append(expired, code)
+			continue
+		}
+		var b StoredBlob
+		err = gob.NewDecoder(f).Decode(&b)
+		f.Close()
+		if err != nil {
+			expired = append(expired, code)
+			continue
+		}
+		expiry := b.ExpiresAt
+		if expiry.IsZero() {
+			expiry = b.CreatedAt.Add(s.storageDuration)
+		}
+		if time.Now().After(expiry) {
 			expired = append(expired, code)
 		}
 	}
-	s.mu.Unlock()
 	for _, code := range expired {
 		s.remove(code)
 	}
 }
 
-func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize int64) error {
+func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize int64, longTerm bool) error {
 	serverMaxBlobSize = maxBlobSize
+	serverLongTerm = longTerm
 	serverID := serverIDFromFlag
 	if ourIP, err := getServerPublicIP(); err == nil {
 		if id, ok := findServerIDByIP(ourIP); ok {
@@ -441,18 +469,16 @@ func handleBench(conn net.Conn, r io.Reader, st *store) {
 		phase = 1
 	}
 	if phase == 1 {
-		// Upload: server reads and discards for duration, then reads totalBytes, sends back
+		// Upload: server reads and discards for full duration, then reads totalBytes, sends back
 		dur := time.Duration(durationSec) * time.Second
 		deadline := time.Now().Add(dur + 2*time.Second)
 		conn.SetReadDeadline(deadline)
 		until := time.Now().Add(dur)
 		buf := make([]byte, 64*1024)
 		for time.Now().Before(until) {
-			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-			_, err := r.Read(buf)
-			if err != nil {
-				break
-			}
+			conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+			_, _ = r.Read(buf)
+			// Do not break on timeout/error – keep reading until full duration
 		}
 		conn.SetReadDeadline(deadline)
 		var clientTotal uint64
@@ -494,6 +520,24 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 		fmt.Fprintf(os.Stderr, "read totalPlainLen: %v\n", err)
 		SendStatus(conn, StatusError)
 		return
+	}
+	var storageDurationSec uint32
+	if err := binary.Read(r, binary.BigEndian, &storageDurationSec); err != nil {
+		fmt.Fprintf(os.Stderr, "read storageDurationSec: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	if storageDurationSec > 0 {
+		if !serverLongTerm {
+			fmt.Fprintf(os.Stderr, "upload rejected: long-term not supported on this server\n")
+			SendStatus(conn, StatusError)
+			return
+		}
+		if int64(totalPlainLen) > LongTermMaxBytes {
+			fmt.Fprintf(os.Stderr, "upload rejected: long-term max %d MB\n", LongTermMaxBytes/(1024*1024))
+			SendStatus(conn, StatusError)
+			return
+		}
 	}
 	if serverMaxBlobSize > 0 && int64(totalPlainLen) > serverMaxBlobSize {
 		fmt.Fprintf(os.Stderr, "upload rejected: blob exceeds max size %d MB\n", serverMaxBlobSize/(1024*1024))
@@ -603,13 +647,19 @@ func handleUpload(conn net.Conn, r io.Reader, st *store) {
 		return
 	}
 
+	createdAt := time.Now()
+	duration := st.storageDuration
+	if storageDurationSec > 0 {
+		duration = time.Duration(storageDurationSec) * time.Second
+	}
 	blob := &StoredBlob{
 		Name:              baseName,
 		PlaintextChecksum: plaintextChecksum,
 		TotalPlainLen:     totalPlainLen,
 		NumChunks:         numChunks,
 		Chunked:           true,
-		CreatedAt:         time.Now(),
+		CreatedAt:         createdAt,
+		ExpiresAt:         createdAt.Add(duration),
 	}
 	if err := st.put(code, blob); err != nil {
 		fmt.Fprintf(os.Stderr, "save to disk: %v\n", err)
@@ -630,6 +680,18 @@ func handleSecureUpload(conn net.Conn, r io.Reader, st *store, serverID int) {
 		handleSecureUploadChunked(conn, r, st, serverID)
 		return
 	}
+	var storageDurationSec uint32
+	if err := binary.Read(r, binary.BigEndian, &storageDurationSec); err != nil {
+		SendStatus(conn, StatusError)
+		return
+	}
+	if storageDurationSec > 0 {
+		if !serverLongTerm {
+			fmt.Fprintf(os.Stderr, "secure upload rejected: long-term not supported on this server\n")
+			SendStatus(conn, StatusError)
+			return
+		}
+	}
 	name, plaintextChecksum, nonce, sealed, err := ReadSecureUpload(r, serverMaxBlobSize)
 	if err != nil {
 		if err == ErrBlobTooLarge {
@@ -640,19 +702,30 @@ func handleSecureUpload(conn net.Conn, r io.Reader, st *store, serverID int) {
 		SendStatus(conn, StatusError)
 		return
 	}
+	if storageDurationSec > 0 && int64(len(sealed)+12+32+2+len(name)) > LongTermMaxBytes {
+		fmt.Fprintf(os.Stderr, "secure upload rejected: long-term max %d MB\n", LongTermMaxBytes/(1024*1024))
+		SendStatus(conn, StatusError)
+		return
+	}
 	baseName := filepath.Base(name)
 	if baseName == "" || strings.Contains(baseName, "..") {
 		SendStatus(conn, StatusError)
 		return
 	}
 	code := generateCodeWithServerID(serverID)
+	createdAt := time.Now()
+	duration := st.storageDuration
+	if storageDurationSec > 0 {
+		duration = time.Duration(storageDurationSec) * time.Second
+	}
 	blob := &StoredBlob{
 		Name:              baseName,
 		PlaintextChecksum: plaintextChecksum,
 		Nonce:             nonce,
 		Sealed:            sealed,
 		Secure:            true,
-		CreatedAt:         time.Now(),
+		CreatedAt:         createdAt,
+		ExpiresAt:         createdAt.Add(duration),
 	}
 	if err := st.put(code, blob); err != nil {
 		fmt.Fprintf(os.Stderr, "save secure blob: %v\n", err)
@@ -666,11 +739,23 @@ func handleSecureUpload(conn net.Conn, r io.Reader, st *store, serverID int) {
 }
 
 func handleSecureUploadChunked(conn net.Conn, r io.Reader, st *store, serverID int) {
-	name, totalPlainLen, numChunks, plaintextChecksum, err := ReadSecureUploadChunkedHeader(r)
+	name, totalPlainLen, storageDurationSec, numChunks, plaintextChecksum, err := ReadSecureUploadChunkedHeader(r)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read secure chunked header: %v\n", err)
 		SendStatus(conn, StatusError)
 		return
+	}
+	if storageDurationSec > 0 {
+		if !serverLongTerm {
+			fmt.Fprintf(os.Stderr, "secure chunked upload rejected: long-term not supported on this server\n")
+			SendStatus(conn, StatusError)
+			return
+		}
+		if int64(totalPlainLen) > LongTermMaxBytes {
+			fmt.Fprintf(os.Stderr, "secure chunked upload rejected: long-term max %d MB\n", LongTermMaxBytes/(1024*1024))
+			SendStatus(conn, StatusError)
+			return
+		}
 	}
 	if serverMaxBlobSize > 0 && int64(totalPlainLen) > serverMaxBlobSize {
 		fmt.Fprintf(os.Stderr, "secure chunked upload rejected: exceeds max size %d MB\n", serverMaxBlobSize/(1024*1024))
@@ -723,6 +808,11 @@ func handleSecureUploadChunked(conn net.Conn, r io.Reader, st *store, serverID i
 		SendStatus(conn, StatusError)
 		return
 	}
+	createdAt := time.Now()
+	duration := st.storageDuration
+	if storageDurationSec > 0 {
+		duration = time.Duration(storageDurationSec) * time.Second
+	}
 	blob := &StoredBlob{
 		Name:              baseName,
 		PlaintextChecksum: plaintextChecksum,
@@ -730,7 +820,8 @@ func handleSecureUploadChunked(conn net.Conn, r io.Reader, st *store, serverID i
 		NumChunks:         numChunks,
 		Chunked:           true,
 		Secure:            true,
-		CreatedAt:         time.Now(),
+		CreatedAt:         createdAt,
+		ExpiresAt:         createdAt.Add(duration),
 	}
 	if err := st.put(code, blob); err != nil {
 		os.Remove(dataPath)
@@ -760,11 +851,6 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 
 	blob, ok := st.get(code)
 	if !ok {
-		SendStatus(conn, StatusNotFound)
-		return
-	}
-	if time.Since(blob.CreatedAt) > st.storageDuration {
-		st.remove(code)
 		SendStatus(conn, StatusNotFound)
 		return
 	}
@@ -875,11 +961,6 @@ func runWebServer(port string, st *store, rl *rateLimiter) {
 		blob, ok := st.get(code)
 		if !ok {
 			http.Redirect(w, r, "/?err=Code+not+found+or+expired", http.StatusFound)
-			return
-		}
-		if time.Since(blob.CreatedAt) > StorageDuration {
-			st.remove(code)
-			http.Redirect(w, r, "/?err=Code+expired", http.StatusFound)
 			return
 		}
 		if blob.Secure {

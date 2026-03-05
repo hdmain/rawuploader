@@ -13,9 +13,10 @@ import (
 )
 
 type secureSendArgs struct {
-	file     string
-	addr     string
-	serverID int
+	file               string
+	addr               string
+	serverID           int
+	storageDurationSec uint32
 }
 
 func parseSecureSendArgs(raw []string) secureSendArgs {
@@ -39,6 +40,14 @@ func parseSecureSendArgs(raw []string) secureSendArgs {
 			}
 			continue
 		}
+		if strings.HasPrefix(s, "-longterm=") {
+			v := strings.TrimSpace(strings.TrimPrefix(s, "-longterm="))
+			if v != "" {
+				sec, _ := parseLongTermDuration(v)
+				out.storageDurationSec = sec
+			}
+			continue
+		}
 		positional = append(positional, s)
 	}
 	if len(positional) >= 1 {
@@ -48,6 +57,34 @@ func parseSecureSendArgs(raw []string) secureSendArgs {
 		out.addr = positional[1]
 	}
 	return out
+}
+
+// parseLongTermDuration parses e.g. "7d", "24h" to seconds. Max 30 days. Returns 0 if invalid.
+func parseLongTermDuration(s string) (uint32, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	var mult time.Duration
+	if strings.HasSuffix(s, "d") {
+		mult = 24 * time.Hour
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "h") {
+		mult = time.Hour
+		s = s[:len(s)-1]
+	} else {
+		return 0, fmt.Errorf("long-term: use e.g. 7d or 24h")
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("long-term: positive number required")
+	}
+	d := time.Duration(n) * mult
+	max := 30 * 24 * time.Hour
+	if d > max {
+		d = max
+	}
+	return uint32(d.Seconds()), nil
 }
 
 const versionURL = "https://raw.githubusercontent.com/hdmain/rawuploader/main/version"
@@ -71,9 +108,11 @@ func main() {
 	serverDir := serverCmd.String("dir", "./data", "directory for stored encrypted blobs")
 	serverWeb := serverCmd.String("web", "", "web port for browser download page (e.g. 8080); empty = disabled")
 	serverMaxSizeMB := serverCmd.Int64("maxsize", 0, "max upload size in MB (0 = use default from code)")
+	serverLongTerm := serverCmd.Bool("longterm", false, "allow long-term storage (client -longterm=e.g. 7d; max 150 MB)")
 
 	clientSendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 	clientSendServerID := clientSendCmd.Int("server", -1, "server id 0–9 to use (default: auto-probe)")
+	clientSendLongTerm := clientSendCmd.String("longterm", "", "store for e.g. 7d or 24h (max 150 MB; server must support -longterm)")
 	clientGetCmd := flag.NewFlagSet("get", flag.ExitOnError)
 	clientGetOut := clientGetCmd.String("o", "", "output file (default: name from server)")
 
@@ -96,7 +135,7 @@ func main() {
 		if *serverMaxSizeMB > 0 {
 			maxBlob = *serverMaxSizeMB * 1024 * 1024
 		}
-		if err := runServer(id, *serverPort, *serverDir, *serverWeb, maxBlob); err != nil {
+		if err := runServer(id, *serverPort, *serverDir, *serverWeb, maxBlob, *serverLongTerm); err != nil {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
 			os.Exit(1)
 		}
@@ -111,7 +150,16 @@ func main() {
 		if len(args) >= 2 {
 			addr = args[1]
 		}
-		if err := runClientSend(args[0], addr, *clientSendServerID); err != nil {
+		longTermSec := uint32(0)
+		if *clientSendLongTerm != "" {
+			sec, err := parseLongTermDuration(*clientSendLongTerm)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "client: %v\n", err)
+				os.Exit(1)
+			}
+			longTermSec = sec
+		}
+		if err := runClientSend(args[0], addr, *clientSendServerID, longTermSec); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -169,7 +217,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file> [host:port]")
 			os.Exit(1)
 		}
-		if err := runClientSecureSend(args.file, args.addr, args.serverID); err != nil {
+		if err := runClientSecureSend(args.file, args.addr, args.serverID, args.storageDurationSec); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}

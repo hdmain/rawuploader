@@ -431,7 +431,7 @@ func generateCodeWithServerID(serverID int) string {
 	return fmt.Sprintf("%d%05d", serverID, rand.Intn(100000))
 }
 
-func runClientSend(filePath string, addr string, serverIDHint int) error {
+func runClientSend(filePath string, addr string, serverIDHint int, storageDurationSec uint32) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
@@ -446,6 +446,9 @@ func runClientSend(filePath string, addr string, serverIDHint int) error {
 		return fmt.Errorf("path is a directory, not a file")
 	}
 	size := info.Size()
+	if storageDurationSec > 0 && size > LongTermMaxBytes {
+		return fmt.Errorf("long-term uploads limited to %d MB", LongTermMaxBytes/(1024*1024))
+	}
 
 	hasher := sha256.New()
 	chunkBuf := make([]byte, FileChunkSize)
@@ -530,7 +533,7 @@ func runClientSend(filePath string, addr string, serverIDHint int) error {
 		return nil, io.EOF
 	}
 	fmt.Println("info: encrypting and sending in chunks...")
-	if err := WriteEncryptedUploadChunked(bw, code, baseName, size, numChunks, plaintextChecksum, getChunk, progress); err != nil {
+	if err := WriteEncryptedUploadChunked(bw, code, baseName, size, storageDurationSec, numChunks, plaintextChecksum, getChunk, progress); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
 	fmt.Println()
@@ -555,7 +558,7 @@ func runClientSend(filePath string, addr string, serverIDHint int) error {
 	}
 }
 
-func runClientSecureSend(filePath string, addr string, serverIDHint int) error {
+func runClientSecureSend(filePath string, addr string, serverIDHint int, storageDurationSec uint32) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
@@ -571,6 +574,9 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int) error {
 	size := info.Size()
 	if size == 0 {
 		return fmt.Errorf("file is empty")
+	}
+	if storageDurationSec > 0 && size > LongTermMaxBytes {
+		return fmt.Errorf("long-term uploads limited to %d MB", LongTermMaxBytes/(1024*1024))
 	}
 
 	key := make([]byte, SecureKeySize)
@@ -633,6 +639,9 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int) error {
 		if _, err := bw.Write([]byte{0}); err != nil {
 			return err
 		}
+		if err := binary.Write(bw, binary.BigEndian, storageDurationSec); err != nil {
+			return fmt.Errorf("write storage duration: %w", err)
+		}
 		if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed, progress); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
@@ -659,7 +668,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int) error {
 		}
 		plaintextChecksum := hasher.Sum(nil)
 		numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
-		if err := WriteSecureUploadChunkedHeader(bw, baseName, size, numChunks, plaintextChecksum); err != nil {
+		if err := WriteSecureUploadChunkedHeader(bw, baseName, size, storageDurationSec, numChunks, plaintextChecksum); err != nil {
 			return fmt.Errorf("send header: %w", err)
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {

@@ -25,8 +25,8 @@ const (
 	dialTimeout       = 30 * time.Second
 	probeTimeout      = 1 * time.Second
 	probeDialTimeout  = 500 * time.Millisecond
-	bufSize           = 2 * 1024 * 1024 // 2 MB bufio for throughput
-	tcpBufferSize     = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
+	bufSize           = 4 * 1024 * 1024 // 4 MB bufio for throughput (high BDP = RTT × bandwidth)
+	tcpBufferSize     = 8 * 1024 * 1024 // 8 MB socket buffers so single stream can fill link on high RTT
 	maxSecureLoadRAM  = 500 * 1024 * 1024 // 500 MB; above this, secure send streams in chunks
 )
 

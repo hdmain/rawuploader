@@ -43,7 +43,7 @@ type EncryptedChunk struct {
 
 type ProgressFunc func(sent, total int64)
 
-const sendChunkSize = 256 * 1024
+const sendChunkSize = 512 * 1024 // larger chunks = fewer syscalls when streaming download
 
 func SendFile(w io.Writer, name string, content io.Reader, size int64, progress ProgressFunc) ([]byte, error) {
 	nameBytes := []byte(name)

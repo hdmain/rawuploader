@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -27,6 +29,194 @@ const (
 	tcpBufferSize     = 4 * 1024 * 1024 // 4 MB socket buffers for high BDP links
 	maxSecureLoadRAM  = 500 * 1024 * 1024 // 500 MB; above this, secure send streams in chunks
 )
+
+func formatValidDuration(storageDurationSec uint32) string {
+	if storageDurationSec == 0 {
+		return "valid 30 min"
+	}
+	d := time.Duration(storageDurationSec) * time.Second
+	if d >= 24*time.Hour {
+		days := int(d / (24 * time.Hour))
+		if days == 1 {
+			return "valid 1 day"
+		}
+		return fmt.Sprintf("valid %d days", days)
+	}
+	if d >= time.Hour {
+		hours := int(d / time.Hour)
+		if hours == 1 {
+			return "valid 1 hour"
+		}
+		return fmt.Sprintf("valid %d hours", hours)
+	}
+	mins := int(d / time.Minute)
+	if mins < 1 {
+		mins = 1
+	}
+	return fmt.Sprintf("valid %d min", mins)
+}
+
+// prepareSendPath returns the path to send (possibly a temp tar.gz) and an optional cleanup to remove temp file.
+// If path is a directory and zip is false, prompts "Pack directory into tar.gz? [y/N]"; if no, returns error.
+func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func(), err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil, err
+	}
+	if info.IsDir() {
+		if !zipFlag {
+			fmt.Print("Pack directory into tar.gz? [y/N] ")
+			rd := bufio.NewReader(os.Stdin)
+			line, _ := rd.ReadString('\n')
+			line = strings.TrimSpace(strings.ToLower(line))
+			if line != "y" && line != "yes" {
+				return "", nil, fmt.Errorf("cannot send directory (use -zip to pack)")
+			}
+		}
+		tmp, err := os.CreateTemp("", "tcpraw-*.tar.gz")
+		if err != nil {
+			return "", nil, fmt.Errorf("create temp: %w", err)
+		}
+		gz := gzip.NewWriter(tmp)
+		tw := tar.NewWriter(gz)
+		baseDir := filepath.Dir(path)
+		err = filepath.Walk(path, func(fpath string, fi os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(baseDir, fpath)
+			if err != nil {
+				return err
+			}
+			if rel == "." {
+				return nil
+			}
+			// tar expects path with forward slashes
+			rel = filepath.ToSlash(rel)
+			hdr, err := tar.FileInfoHeader(fi, "")
+			if err != nil {
+				return err
+			}
+			hdr.Name = rel
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
+			if fi.Mode().IsRegular() {
+				f, err := os.Open(fpath)
+				if err != nil {
+					return err
+				}
+				_, err = io.Copy(tw, f)
+				f.Close()
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			tw.Close()
+			gz.Close()
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", nil, fmt.Errorf("pack directory: %w", err)
+		}
+		if err := tw.Close(); err != nil {
+			gz.Close()
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", nil, err
+		}
+		if err := gz.Close(); err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", nil, err
+		}
+		if err := tmp.Close(); err != nil {
+			os.Remove(tmp.Name())
+			return "", nil, err
+		}
+		return tmp.Name(), func() { os.Remove(tmp.Name()) }, nil
+	}
+	// single file
+	if zipFlag {
+		tmp, err := os.CreateTemp("", "tcpraw-*.tar.gz")
+		if err != nil {
+			return "", nil, fmt.Errorf("create temp: %w", err)
+		}
+		gz := gzip.NewWriter(tmp)
+		tw := tar.NewWriter(gz)
+		f, err := os.Open(path)
+		if err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", nil, err
+		}
+		info, _ := f.Stat()
+		hdr, _ := tar.FileInfoHeader(info, "")
+		hdr.Name = filepath.Base(path)
+		tw.WriteHeader(hdr)
+		io.Copy(tw, f)
+		f.Close()
+		tw.Close()
+		gz.Close()
+		tmp.Close()
+		return tmp.Name(), func() { os.Remove(tmp.Name()) }, nil
+	}
+	return path, nil, nil
+}
+
+// extractTarGz extracts archivePath (tar.gz) into the same directory, then removes the archive.
+func extractTarGz(archivePath string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("not a gzip file: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	destDir := filepath.Dir(archivePath)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		// Safe path: no leading slash or ".." escaping
+		name := filepath.Clean(hdr.Name)
+		if name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			continue
+		}
+		target := filepath.Join(destDir, name)
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", target, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode)&0777)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(out, tr)
+			out.Close()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	f.Close()
+	return os.Remove(archivePath)
+}
 
 // serverList: [id 0..9] = "host:port"
 func fetchServerList() ([]string, error) {
@@ -549,7 +739,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 
 	switch status {
 	case StatusOK:
-		fmt.Printf("File sent (encrypted). Your code: %s (valid 1 hour)\n", code)
+		fmt.Printf("File sent (encrypted). Your code: %s (%s)\n", code, formatValidDuration(storageDurationSec))
 		return nil
 	case StatusError:
 		return fmt.Errorf("server error")
@@ -718,13 +908,13 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 	}
 
 	fmt.Println()
-	fmt.Printf("Code: %s (valid 1 hour)\n", code)
+	fmt.Printf("Code: %s (%s)\n", code, formatValidDuration(storageDurationSec))
 	fmt.Printf("Key (save it – needed to download): %s\n", hex.EncodeToString(key))
 	fmt.Println("Without the key the file cannot be decrypted.")
 	return nil
 }
 
-func runClientGet(code, outputPath string) error {
+func runClientGet(code, outputPath string, unzip bool) error {
 	if len(code) != CodeLength {
 		return fmt.Errorf("code must be 6 digits")
 	}
@@ -813,6 +1003,12 @@ func runClientGet(code, outputPath string) error {
 			return fmt.Errorf("write file %s: %w", savePath, err)
 		}
 		fmt.Printf("Downloaded: %s\n", savePath)
+		if unzip {
+			if err := extractTarGz(savePath); err != nil {
+				return fmt.Errorf("unzip: %w", err)
+			}
+			fmt.Println("Extracted archive.")
+		}
 		return nil
 	}
 
@@ -854,6 +1050,12 @@ func runClientGet(code, outputPath string) error {
 			return fmt.Errorf("write file %s: %w", savePath, err)
 		}
 		fmt.Printf("Downloaded: %s\n", savePath)
+		if unzip {
+			if err := extractTarGz(savePath); err != nil {
+				return fmt.Errorf("unzip: %w", err)
+			}
+			fmt.Println("Extracted archive.")
+		}
 		return nil
 	}
 
@@ -911,6 +1113,12 @@ func runClientGet(code, outputPath string) error {
 			return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
 		}
 		fmt.Printf("Downloaded: %s\n", savePath)
+		if unzip {
+			if err := extractTarGz(savePath); err != nil {
+				return fmt.Errorf("unzip: %w", err)
+			}
+			fmt.Println("Extracted archive.")
+		}
 		return nil
 	}
 
@@ -949,6 +1157,12 @@ func runClientGet(code, outputPath string) error {
 		return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
 	}
 	fmt.Printf("Downloaded: %s\n", savePath)
+	if unzip {
+		if err := extractTarGz(savePath); err != nil {
+			return fmt.Errorf("unzip: %w", err)
+		}
+		fmt.Println("Extracted archive.")
+	}
 	return nil
 }
 

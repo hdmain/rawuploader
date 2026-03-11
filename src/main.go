@@ -17,6 +17,7 @@ type secureSendArgs struct {
 	addr               string
 	serverID           int
 	storageDurationSec uint32
+	zip                bool
 }
 
 func parseSecureSendArgs(raw []string) secureSendArgs {
@@ -46,6 +47,10 @@ func parseSecureSendArgs(raw []string) secureSendArgs {
 				sec, _ := parseLongTermDuration(v)
 				out.storageDurationSec = sec
 			}
+			continue
+		}
+		if s == "-zip" {
+			out.zip = true
 			continue
 		}
 		positional = append(positional, s)
@@ -113,8 +118,10 @@ func main() {
 	clientSendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 	clientSendServerID := clientSendCmd.Int("server", -1, "server id 0–9 to use (default: auto-probe)")
 	clientSendLongTerm := clientSendCmd.String("longterm", "", "store for e.g. 7d or 24h (max 150 MB; server must support -longterm)")
+	clientSendZip := clientSendCmd.Bool("zip", false, "pack file or directory into tar.gz before sending")
 	clientGetCmd := flag.NewFlagSet("get", flag.ExitOnError)
 	clientGetOut := clientGetCmd.String("o", "", "output file (default: name from server)")
+	clientGetUnzip := clientGetCmd.Bool("unzip", false, "after download, extract tar.gz and remove archive")
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -159,7 +166,15 @@ func main() {
 			}
 			longTermSec = sec
 		}
-		if err := runClientSend(args[0], addr, *clientSendServerID, longTermSec); err != nil {
+		sendPath, cleanup, err := prepareSendPath(args[0], *clientSendZip)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "client: %v\n", err)
+			os.Exit(1)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if err := runClientSend(sendPath, addr, *clientSendServerID, longTermSec); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -167,6 +182,7 @@ func main() {
 		// Extract -o/--output from any position (flag.Parse stops at first non-flag)
 		getArgs := os.Args[2:]
 		var getOutput string
+		var getUnzip bool
 		var getPositional []string
 		for i := 0; i < len(getArgs); i++ {
 			switch getArgs[i] {
@@ -176,13 +192,19 @@ func main() {
 					i++
 				}
 				continue
+			case "-unzip":
+				getUnzip = true
+				continue
 			}
 			getPositional = append(getPositional, getArgs[i])
 		}
 		_ = clientGetCmd.Parse(getPositional)
+		if *clientGetUnzip {
+			getUnzip = true
+		}
 		args := clientGetCmd.Args()
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw get <6-digit-code> [-o file]")
+			fmt.Fprintln(os.Stderr, "usage: tcpraw get <6-digit-code> [-o file] [-unzip]")
 			os.Exit(1)
 		}
 		code := args[0]
@@ -190,7 +212,7 @@ func main() {
 		if outPath == "" {
 			outPath = *clientGetOut
 		}
-		if err := runClientGet(code, outPath); err != nil {
+		if err := runClientGet(code, outPath, getUnzip); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}
@@ -217,7 +239,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file> [host:port]")
 			os.Exit(1)
 		}
-		if err := runClientSecureSend(args.file, args.addr, args.serverID, args.storageDurationSec); err != nil {
+		sendPath, cleanup, err := prepareSendPath(args.file, args.zip)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "client: %v\n", err)
+			os.Exit(1)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if err := runClientSecureSend(sendPath, args.addr, args.serverID, args.storageDurationSec); err != nil {
 			fmt.Fprintf(os.Stderr, "client: %v\n", err)
 			os.Exit(1)
 		}

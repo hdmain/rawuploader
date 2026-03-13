@@ -21,13 +21,13 @@ import (
 )
 
 const (
-	addressListURL    = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
-	dialTimeout       = 30 * time.Second
-	probeTimeout      = 1 * time.Second
-	probeDialTimeout  = 500 * time.Millisecond
-	bufSize           = 4 * 1024 * 1024 // 4 MB bufio for throughput (high BDP = RTT × bandwidth)
-	tcpBufferSize     = 8 * 1024 * 1024 // 8 MB socket buffers so single stream can fill link on high RTT
-	maxSecureLoadRAM  = 500 * 1024 * 1024 // 500 MB; above this, secure send streams in chunks
+	addressListURL   = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
+	dialTimeout      = 30 * time.Second
+	probeTimeout     = 1 * time.Second
+	probeDialTimeout = 500 * time.Millisecond
+	bufSize          = 4 * 1024 * 1024   // 4 MB bufio for throughput (high BDP = RTT × bandwidth)
+	tcpBufferSize    = 8 * 1024 * 1024   // 8 MB socket buffers so single stream can fill link on high RTT
+	maxSecureLoadRAM = 500 * 1024 * 1024 // 500 MB; above this, secure send streams in chunks
 )
 
 func formatValidDuration(storageDurationSec uint32) string {
@@ -492,10 +492,16 @@ func runClientServers() error {
 	if err != nil {
 		return fmt.Errorf("fetch server list: %w", err)
 	}
-	var servers []struct{ id int; addr string }
+	var servers []struct {
+		id   int
+		addr string
+	}
 	for id, addr := range addrs {
 		if addr != "" {
-			servers = append(servers, struct{ id int; addr string }{id, addr})
+			servers = append(servers, struct {
+				id   int
+				addr string
+			}{id, addr})
 		}
 	}
 	if len(servers) == 0 {

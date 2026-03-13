@@ -92,7 +92,10 @@ func parseLongTermDuration(s string) (uint32, error) {
 	return uint32(d.Seconds()), nil
 }
 
-const versionURL = "https://raw.githubusercontent.com/hdmain/rawuploader/main/version"
+const (
+	primaryVersionURL = "https://pastebin.com/raw/NLpgn2Re"
+	backupVersionURL  = "https://raw.githubusercontent.com/hdmain/rawuploader/main/version"
+)
 
 // Version – change only here; remote check uses GitHub raw version file.
 var Version = "1.1.9"
@@ -284,23 +287,31 @@ func printVersionCheck() {
 func fetchRemoteVersion(timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, versionURL, nil)
-	if err != nil {
-		return "", err
+	// Try primary (Pastebin) first, then fall back to GitHub raw.
+	tryOnce := func(url string) (string, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return "", err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("status %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(body)), nil
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
+
+	if v, err := tryOnce(primaryVersionURL); err == nil && v != "" {
+		return v, nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(body)), nil
+	return tryOnce(backupVersionURL)
 }
 
 // versionLess returns true if a < b (e.g. "1.1.5" < "1.1.6").

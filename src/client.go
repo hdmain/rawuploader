@@ -21,7 +21,9 @@ import (
 )
 
 const (
-	addressListURL   = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
+	primaryAddressListURL = "https://pastebin.com/raw/BnAAYunN"
+	backupAddressListURL  = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
+
 	dialTimeout      = 30 * time.Second
 	probeTimeout     = 1 * time.Second
 	probeDialTimeout = 500 * time.Millisecond
@@ -220,9 +222,13 @@ func extractTarGz(archivePath string) error {
 
 // serverList: [id 0..9] = "host:port"
 func fetchServerList() ([]string, error) {
-	body, err := fetchAddressFromURL(addressListURL)
-	if err != nil {
-		return nil, err
+	// Try primary (Pastebin) first, then fall back to GitHub raw if needed.
+	body, err := fetchAddressFromURL(primaryAddressListURL)
+	if err != nil || strings.TrimSpace(body) == "" {
+		body, err = fetchAddressFromURL(backupAddressListURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	addrs := make([]string, 10)
 	for _, line := range strings.Split(body, "\n") {

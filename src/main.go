@@ -95,7 +95,7 @@ func parseLongTermDuration(s string) (uint32, error) {
 const versionURL = "https://raw.githubusercontent.com/hdmain/rawuploader/main/version"
 
 // Version – change only here; remote check uses GitHub raw version file.
-var Version = "1.1.8"
+var Version = "1.1.9"
 
 var (
 	StorageDuration   = 30 * time.Minute

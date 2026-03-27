@@ -25,6 +25,8 @@ if errorlevel 1 (
 
 echo [1/2] Building Windows binary...
 pushd "%SRC%" >nul
+set "GOOS=windows"
+set "GOARCH=amd64"
 go build -o "%WIN_OUT%" .
 if errorlevel 1 (
   popd >nul
@@ -32,6 +34,8 @@ if errorlevel 1 (
   exit /b 1
 )
 popd >nul
+set "GOOS="
+set "GOARCH="
 echo [OK] Windows binary: "%WIN_OUT%"
 
 echo [2/2] Building Linux binary via WSL...

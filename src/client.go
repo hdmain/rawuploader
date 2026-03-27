@@ -27,8 +27,8 @@ const (
 	dialTimeout      = 30 * time.Second
 	probeTimeout     = 1 * time.Second
 	probeDialTimeout = 500 * time.Millisecond
-	bufSize          = 4 * 1024 * 1024   // 4 MB bufio for throughput (high BDP = RTT × bandwidth)
-	tcpBufferSize    = 8 * 1024 * 1024   // 8 MB socket buffers so single stream can fill link on high RTT
+	bufSize          = 2 * 1024 * 1024   // 2 MB bufio
+	tcpBufferSize    = 4 * 1024 * 1024   // 4 MB socket buffers
 	maxSecureLoadRAM = 500 * 1024 * 1024 // 500 MB; above this, secure send streams in chunks
 )
 
@@ -417,10 +417,25 @@ func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, fr
 		return 0, 0, 0, 0, err
 	}
 	pingMs = time.Since(pingStart).Seconds() * 1000
-	// Read durationSec of stream and count bytes (client-side throughput); then read 8-byte serverTotal to stay in sync
+	// Read stream for at least durationSec and at least benchMinBytes (better measurement stability),
+	// then read 8-byte serverTotal to stay in sync.
 	until := time.Now().Add(time.Duration(durationSec) * time.Second)
 	var downCount countWriter
-	_, _ = io.Copy(&downCount, &timeLimitReader{r: r, until: until})
+	tmp := make([]byte, 64*1024)
+	for time.Now().Before(until) || int64(downCount) < benchMinBytes {
+		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		n, readErr := r.Read(tmp)
+		if n > 0 {
+			downCount += countWriter(n)
+		}
+		if readErr != nil {
+			if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			break
+		}
+	}
+	_ = conn.SetReadDeadline(time.Time{})
 	var serverTotal uint64
 	if err := binary.Read(r, binary.BigEndian, &serverTotal); err != nil {
 		return pingMs, free, 0, 0, err
@@ -443,8 +458,11 @@ func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, fr
 	}
 	until = time.Now().Add(time.Duration(durationSec) * time.Second)
 	randBuf := make([]byte, 64*1024)
+	if _, err := io.ReadFull(crand.Reader, randBuf); err != nil {
+		return pingMs, free, downloadBps, 0, nil
+	}
 	var upTotal int64
-	for time.Now().Before(until) {
+	for time.Now().Before(until) || upTotal < benchMinBytes {
 		n, _ := bw.Write(randBuf)
 		if n > 0 {
 			upTotal += int64(n)
@@ -514,7 +532,7 @@ func runClientServers() error {
 		fmt.Println("No servers in list.")
 		return nil
 	}
-	fmt.Printf("Testing each server (2s download, 2s upload)...\n")
+	fmt.Printf("Testing each server (2s download, 2s upload of random data)...\n")
 	fmt.Println("(N/A = server unreachable or older version without benchmark – update server and try again)")
 	var results []serverStats
 	for _, srv := range servers {

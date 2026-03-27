@@ -79,10 +79,10 @@ var serverMaxBlobSize int64
 var serverLongTerm bool
 
 type store struct {
-	mu               sync.RWMutex
-	index            map[string]time.Time
-	dataDir          string
-	storageDuration  time.Duration
+	mu              sync.RWMutex
+	index           map[string]time.Time
+	dataDir         string
+	storageDuration time.Duration
 }
 
 func newStore(dataDir string) (*store, error) {
@@ -441,12 +441,12 @@ func handleBench(conn net.Conn, r io.Reader, st *store) {
 		if err := binary.Write(conn, binary.BigEndian, free); err != nil {
 			return
 		}
-		deadline := time.Now().Add(duration + 2*time.Second)
+		deadline := time.Now().Add(duration + 10*time.Second)
 		conn.SetWriteDeadline(deadline)
 		buf := make([]byte, 64*1024)
 		var total int64
 		stop := time.Now().Add(duration)
-		for time.Now().Before(stop) {
+		for time.Now().Before(stop) || total < benchMinBytes {
 			n, err := conn.Write(buf)
 			if err != nil {
 				return
@@ -471,13 +471,17 @@ func handleBench(conn net.Conn, r io.Reader, st *store) {
 	if phase == 1 {
 		// Upload: server reads and discards for full duration, then reads totalBytes, sends back
 		dur := time.Duration(durationSec) * time.Second
-		deadline := time.Now().Add(dur + 2*time.Second)
+		deadline := time.Now().Add(dur + 10*time.Second)
 		conn.SetReadDeadline(deadline)
 		until := time.Now().Add(dur)
 		buf := make([]byte, 64*1024)
-		for time.Now().Before(until) {
+		var totalRead int64
+		for time.Now().Before(until) || totalRead < benchMinBytes {
 			conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-			_, _ = r.Read(buf)
+			n, _ := r.Read(buf)
+			if n > 0 {
+				totalRead += int64(n)
+			}
 			// Do not break on timeout/error – keep reading until full duration
 		}
 		conn.SetReadDeadline(deadline)

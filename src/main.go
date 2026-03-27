@@ -98,7 +98,7 @@ const (
 )
 
 // Version – change only here; remote check uses GitHub raw version file.
-var Version = "1.1.9"
+var Version = "1.2.0"
 
 var (
 	StorageDuration   = 30 * time.Minute
@@ -353,7 +353,7 @@ func printUsage() {
 	fmt.Println("  tcpraw send [-server=0-9] <file> [host:port]   (-server = use that server id; host:port = override)")
 	fmt.Println("  tcpraw secure send [-server=0-9] <file> [host:port]")
 	fmt.Println("  tcpraw get <6-digit-code> [-o file]")
-	fmt.Println("  tcpraw servers   (benchmark each server: 2s download, 2s upload)")
+	fmt.Println("  tcpraw servers   (benchmark each server: 2s download, 2s upload of random data)")
 	fmt.Println()
 	fmt.Println("Servers are read from the address list (first digit of code = server id).")
 	fmt.Printf("Data kept %v, cleanup every %v, max upload %d MB, rate limit %d codes/%v then %v ban\n",

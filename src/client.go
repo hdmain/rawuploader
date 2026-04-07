@@ -15,9 +15,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	pgzip "github.com/klauspost/pgzip"
 )
 
 const (
@@ -58,6 +61,16 @@ func formatValidDuration(storageDurationSec uint32) string {
 	return fmt.Sprintf("valid %d min", mins)
 }
 
+func newParallelGzipWriter(w io.Writer) (*pgzip.Writer, error) {
+	gz, err := pgzip.NewWriterLevel(w, gzip.DefaultCompression)
+	if err != nil {
+		return nil, err
+	}
+	// Use all CPU cores for gzip compression blocks.
+	gz.SetConcurrency(1<<20, runtime.NumCPU())
+	return gz, nil
+}
+
 // prepareSendPath returns the path to send (possibly a temp tar.gz) and an optional cleanup to remove temp file.
 // If path is a directory and zip is false, prompts "Pack directory into tar.gz? [y/N]"; if no, returns error.
 func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func(), err error) {
@@ -79,7 +92,13 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 		if err != nil {
 			return "", nil, fmt.Errorf("create temp: %w", err)
 		}
-		gz := gzip.NewWriter(tmp)
+		fmt.Printf("info: compressing using %d CPU cores...\n", runtime.NumCPU())
+		gz, err := newParallelGzipWriter(tmp)
+		if err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", nil, err
+		}
 		tw := tar.NewWriter(gz)
 		baseDir := filepath.Dir(path)
 		err = filepath.Walk(path, func(fpath string, fi os.FileInfo, walkErr error) error {
@@ -146,7 +165,13 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 		if err != nil {
 			return "", nil, fmt.Errorf("create temp: %w", err)
 		}
-		gz := gzip.NewWriter(tmp)
+		fmt.Printf("info: compressing using %d CPU cores...\n", runtime.NumCPU())
+		gz, err := newParallelGzipWriter(tmp)
+		if err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", nil, err
+		}
 		tw := tar.NewWriter(gz)
 		f, err := os.Open(path)
 		if err != nil {

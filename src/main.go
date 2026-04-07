@@ -98,7 +98,7 @@ const (
 )
 
 // Version – change only here; remote check uses GitHub raw version file.
-var Version = "1.2.0"
+var Version = "1.2.1"
 
 var (
 	StorageDuration   = 30 * time.Minute
@@ -122,6 +122,7 @@ func main() {
 	clientSendServerID := clientSendCmd.Int("server", -1, "server id 0–9 to use (default: auto-probe)")
 	clientSendLongTerm := clientSendCmd.String("longterm", "", "store for e.g. 7d or 24h (max 150 MB; server must support -longterm)")
 	clientSendZip := clientSendCmd.Bool("zip", false, "pack file or directory into tar.gz before sending")
+	clientSendLocal := clientSendCmd.Bool("local", false, "local LAN send mode")
 	clientGetCmd := flag.NewFlagSet("get", flag.ExitOnError)
 	clientGetOut := clientGetCmd.String("o", "", "output file (default: name from server)")
 	clientGetUnzip := clientGetCmd.Bool("unzip", false, "after download, extract tar.gz and remove archive")
@@ -131,6 +132,15 @@ func main() {
 		printTotalNetworkStorage()
 		printVersionCheck()
 		os.Exit(1)
+	}
+
+	// Shortcut mode: tcpraw <file> -local
+	if len(os.Args) >= 3 && hasArg(os.Args[1:], "-local") && os.Args[1] != "get" && os.Args[1] != "send" && os.Args[1] != "server" && os.Args[1] != "secure" && os.Args[1] != "servers" {
+		if err := runLocalSender(os.Args[1]); err != nil {
+			fmt.Fprintf(os.Stderr, "local: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	switch os.Args[1] {
@@ -155,6 +165,13 @@ func main() {
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: tcpraw send <file> [host:port]")
 			os.Exit(1)
+		}
+		if *clientSendLocal {
+			if err := runLocalSender(args[0]); err != nil {
+				fmt.Fprintf(os.Stderr, "local: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 		addr := ""
 		if len(args) >= 2 {
@@ -187,6 +204,7 @@ func main() {
 		var getOutput string
 		var getUnzip bool
 		var getPositional []string
+		getLocal := false
 		for i := 0; i < len(getArgs); i++ {
 			switch getArgs[i] {
 			case "-o", "--output":
@@ -198,8 +216,18 @@ func main() {
 			case "-unzip":
 				getUnzip = true
 				continue
+			case "-local":
+				getLocal = true
+				continue
 			}
 			getPositional = append(getPositional, getArgs[i])
+		}
+		if getLocal {
+			if err := runLocalReceiver(); err != nil {
+				fmt.Fprintf(os.Stderr, "local: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 		_ = clientGetCmd.Parse(getPositional)
 		if *clientGetUnzip {
@@ -350,9 +378,11 @@ func printUsage() {
 	fmt.Println("    -id=ID       server id 0–9 (first digit of generated codes); default 0")
 	fmt.Println("    -web=PORT    serve download page in browser (no client needed)")
 	fmt.Println("    -maxsize=MB  max upload size in MB (0 = default from code)")
-	fmt.Println("  tcpraw send [-server=0-9] <file> [host:port]   (-server = use that server id; host:port = override)")
+	fmt.Println("  tcpraw send [-server=0-9] [-local] <file> [host:port]   (-server = use that server id; host:port = override)")
 	fmt.Println("  tcpraw secure send [-server=0-9] <file> [host:port]")
 	fmt.Println("  tcpraw get <6-digit-code> [-o file]")
+	fmt.Println("  tcpraw <file> -local")
+	fmt.Println("  tcpraw get -local")
 	fmt.Println("  tcpraw servers   (benchmark each server: 2s download, 2s upload of random data)")
 	fmt.Println()
 	fmt.Println("Servers are read from the address list (first digit of code = server id).")
@@ -363,4 +393,13 @@ func printUsage() {
 	fmt.Println("  tcpraw server -port=9999")
 	fmt.Println("  tcpraw send document.pdf")
 	fmt.Println("  tcpraw get 482917 -o myfile.pdf")
+}
+
+func hasArg(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
 }

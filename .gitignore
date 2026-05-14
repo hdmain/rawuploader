@@ -11,6 +11,9 @@ tcprawuplug/*.tsbuildinfo
 # parent repo tracks source files instead of a gitlink submodule.
 tcprawuplug/.git/
 
+# Same for legacy rawuploader/ tree (avoid nested-repo gitlink on GitHub).
+rawuploader/.git/
+
 # --- Go (manual / local CI-style builds in src/) ---
 src/tcpraw-linux-amd64
 src/tcpraw-windows-amd64.exe

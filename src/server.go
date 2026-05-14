@@ -422,7 +422,11 @@ func handleTest(conn net.Conn, r io.Reader, st *store) {
 		}
 		buf = buf[n:]
 	}
-	// Client may close; we don't check fileSize vs free here, client does
+	// New clients send the same amount back (upload throughput matches real sends).
+	// Old clients close here — EOF / ErrUnexpectedEOF is OK.
+	if _, err := io.CopyN(io.Discard, r, int64(payloadSize)); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return
+	}
 	_ = fileSize
 }
 

@@ -28,8 +28,8 @@ const (
 	backupAddressListURL  = "https://raw.githubusercontent.com/hdmain/rawuploader/refs/heads/main/address"
 
 	dialTimeout      = 30 * time.Second
-	probeTimeout     = 1 * time.Second
-	probeDialTimeout = 500 * time.Millisecond
+	probeTimeout     = 8 * time.Second // download + upload probe (256 KiB each way)
+	probeDialTimeout = 1 * time.Second
 	bufSize          = 2 * 1024 * 1024   // 2 MB bufio
 	tcpBufferSize    = 4 * 1024 * 1024   // 4 MB socket buffers
 	maxSecureLoadRAM = 500 * 1024 * 1024 // 500 MB; above this, secure send streams in chunks
@@ -321,10 +321,23 @@ func probeServer(addr string, serverID int, fileSize uint64) (speedBps float64, 
 		return 0, false
 	}
 
-	start := time.Now()
-	n, err := io.CopyN(io.Discard, conn, int64(payloadLen))
-	if err != nil || n != int64(payloadLen) {
+	if _, err := io.CopyN(io.Discard, conn, int64(payloadLen)); err != nil {
 		return 0, false
+	}
+	// Rank by upload speed — send() is limited by client→server throughput, not download.
+	upBuf := make([]byte, 64*1024)
+	var wrote int64
+	start := time.Now()
+	for wrote < int64(payloadLen) {
+		n := len(upBuf)
+		if int64(payloadLen)-wrote < int64(n) {
+			n = int(int64(payloadLen) - wrote)
+		}
+		nn, err := conn.Write(upBuf[:n])
+		if err != nil {
+			return 0, false
+		}
+		wrote += int64(nn)
 	}
 	elapsed := time.Since(start).Seconds()
 	if elapsed < 0.0001 {
@@ -344,31 +357,27 @@ func tryServersFromList(fileSize int64) (net.Conn, int, error) {
 		fileSizeU = 0
 	}
 
-	var wg sync.WaitGroup
-	results := make(chan probeResult, 10)
+	type cand struct {
+		id   int
+		addr string
+	}
+	var list []cand
 	for id, addr := range addrs {
 		if addr == "" {
 			continue
 		}
-		wg.Add(1)
-		go func(serverID int, a string) {
-			defer wg.Done()
-			speed, ok := probeServer(a, serverID, fileSizeU)
-			results <- probeResult{serverID, a, speed, ok}
-		}(id, addr)
+		list = append(list, cand{id, addr})
 	}
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+	rand.Shuffle(len(list), func(i, j int) { list[i], list[j] = list[j], list[i] })
 
 	var best probeResult
-	for r := range results {
-		if !r.ok {
+	for _, c := range list {
+		speed, ok := probeServer(c.addr, c.id, fileSizeU)
+		if !ok {
 			continue
 		}
-		if r.speedBps > best.speedBps {
-			best = r
+		if !best.ok || speed > best.speedBps {
+			best = probeResult{c.id, c.addr, speed, true}
 		}
 	}
 
@@ -737,7 +746,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 		setTCPBuffers(conn)
 		serverID = serverIDHint
 	} else {
-		fmt.Println("info: probing servers (disk space + bandwidth, max 1s)...")
+		fmt.Println("info: probing servers (disk space + 256 KiB upload sample per server)...")
 		var err error
 		conn, serverID, err = tryServersFromList(size)
 		if err != nil {
@@ -846,7 +855,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 		}
 		setTCPBuffers(conn)
 	} else {
-		fmt.Println("info: probing servers (disk space + bandwidth, max 1s)...")
+		fmt.Println("info: probing servers (disk space + 256 KiB upload sample per server)...")
 		conn, _, err = tryServersFromList(size)
 	}
 	if err != nil {

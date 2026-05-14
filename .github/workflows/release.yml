@@ -22,13 +22,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     defaults:
       run:
-        working-directory: rawuploader/src
+        working-directory: src
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: rawuploader/src/go.mod
+          go-version-file: src/go.mod
 
       - name: Build
         shell: bash
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: rawuploader/src/${{ matrix.asset }}
+          path: src/${{ matrix.asset }}
 
   release:
     needs: build

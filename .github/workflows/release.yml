@@ -1,0 +1,61 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: tcpraw-linux-amd64
+          - os: windows-latest
+            asset: tcpraw-windows-amd64.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rawuploader/src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: rawuploader/src/go.mod
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${{ matrix.asset }}"
+          go build -trimpath -ldflags="-s -w" -o "$out" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: rawuploader/src/${{ matrix.asset }}
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tcpraw-*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

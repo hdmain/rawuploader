@@ -1,0 +1,20 @@
+# --- tcprawuplug (VS Code extension; details in tcprawuplug/.gitignore) ---
+tcprawuplug/node_modules/
+tcprawuplug/out/
+tcprawuplug/dist/
+tcprawuplug/*.vsix
+tcprawuplug/.vscode-test/
+tcprawuplug/.eslintcache
+tcprawuplug/*.tsbuildinfo
+
+# If tcprawuplug was ever `git init` on its own, ignore inner metadata so the
+# parent repo tracks source files instead of a gitlink submodule.
+tcprawuplug/.git/
+
+# --- Go (manual / local CI-style builds in src/) ---
+src/tcpraw-linux-amd64
+src/tcpraw-windows-amd64.exe
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db

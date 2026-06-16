@@ -245,6 +245,66 @@ func extractTarGz(archivePath string) error {
 	return os.Remove(archivePath)
 }
 
+func resolveDownloadPath(outputPath, remoteName string) string {
+	if outputPath != "" {
+		return outputPath
+	}
+	if base := filepath.Base(remoteName); base != "" && base != "." {
+		return base
+	}
+	return "downloaded_file"
+}
+
+func checksumFileAsync(path string) <-chan []byte {
+	done := make(chan []byte, 1)
+	go func() {
+		f, err := os.Open(path)
+		if err != nil {
+			done <- nil
+			return
+		}
+		defer f.Close()
+
+		hasher := sha256.New()
+		if _, err := io.Copy(hasher, f); err != nil {
+			done <- nil
+			return
+		}
+		done <- hasher.Sum(nil)
+	}()
+	return done
+}
+
+func handleExistingDownload(savePath string, expectedChecksum []byte, unzip bool) (bool, error) {
+	info, err := os.Stat(savePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+
+	actualChecksum := <-checksumFileAsync(savePath)
+	if !checksumEqual(actualChecksum, expectedChecksum) {
+		return false, nil
+	}
+
+	if unzip {
+		fmt.Printf("File already exists with matching checksum, extracting only: %s\n", savePath)
+		if err := extractTarGz(savePath); err != nil {
+			return true, fmt.Errorf("unzip: %w", err)
+		}
+		fmt.Println("Extracted archive.")
+		return true, nil
+	}
+
+	fmt.Printf("File already exists with matching checksum: %s\n", savePath)
+	return true, nil
+}
+
 // serverList: [id 0..9] = "host:port"
 func fetchServerList() ([]string, error) {
 	// Try primary (Pastebin) first, then fall back to GitHub raw if needed.
@@ -1042,7 +1102,15 @@ func runClientGet(code, outputPath string, unzip bool) error {
 	}
 
 	if formatByte[0] == 0 {
-		name, plaintextChecksum, nonce, sealed, err := ReadEncryptedBlob(br, progress)
+		name, plaintextChecksum, nonce, sealedLen, err := ReadEncryptedBlobHeader(br)
+		if err != nil {
+			return fmt.Errorf("read encrypted blob header: %w", err)
+		}
+		savePath := resolveDownloadPath(outputPath, name)
+		if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
+			return err
+		}
+		sealed, err := ReadEncryptedBlobBody(br, sealedLen, progress)
 		if err != nil {
 			return fmt.Errorf("read encrypted blob: %w", err)
 		}
@@ -1055,13 +1123,6 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		actualChecksum := sha256.Sum256(plaintext)
 		if !checksumEqual(actualChecksum[:], plaintextChecksum) {
 			return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
-		}
-		savePath := outputPath
-		if savePath == "" {
-			savePath = filepath.Base(name)
-		}
-		if savePath == "" {
-			savePath = "downloaded_file"
 		}
 		if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
 			return fmt.Errorf("write file %s: %w", savePath, err)
@@ -1077,7 +1138,15 @@ func runClientGet(code, outputPath string, unzip bool) error {
 	}
 
 	if formatByte[0] == 2 {
-		name, plaintextChecksum, nonce, sealed, err := ReadEncryptedBlob(br, progress)
+		name, plaintextChecksum, nonce, sealedLen, err := ReadEncryptedBlobHeader(br)
+		if err != nil {
+			return fmt.Errorf("read encrypted blob header: %w", err)
+		}
+		savePath := resolveDownloadPath(outputPath, name)
+		if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
+			return err
+		}
+		sealed, err := ReadEncryptedBlobBody(br, sealedLen, progress)
 		if err != nil {
 			return fmt.Errorf("read encrypted blob: %w", err)
 		}
@@ -1103,13 +1172,6 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		if !checksumEqual(sum[:], plaintextChecksum) {
 			return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
 		}
-		savePath := outputPath
-		if savePath == "" {
-			savePath = filepath.Base(name)
-		}
-		if savePath == "" {
-			savePath = "downloaded_file"
-		}
 		if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
 			return fmt.Errorf("write file %s: %w", savePath, err)
 		}
@@ -1128,6 +1190,10 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		if err != nil {
 			return fmt.Errorf("read blob header: %w", err)
 		}
+		savePath := resolveDownloadPath(outputPath, name)
+		if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
+			return err
+		}
 		fmt.Println()
 		fmt.Print("Enter key (64 hex characters): ")
 		var keyHex string
@@ -1141,13 +1207,6 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		key, err := hex.DecodeString(keyHex)
 		if err != nil {
 			return fmt.Errorf("invalid hex key: %w", err)
-		}
-		savePath := outputPath
-		if savePath == "" {
-			savePath = filepath.Base(name)
-		}
-		if savePath == "" {
-			savePath = "downloaded_file"
 		}
 		out, err := os.Create(savePath)
 		if err != nil {
@@ -1190,12 +1249,9 @@ func runClientGet(code, outputPath string, unzip bool) error {
 	if err != nil {
 		return fmt.Errorf("read blob header: %w", err)
 	}
-	savePath := outputPath
-	if savePath == "" {
-		savePath = filepath.Base(name)
-	}
-	if savePath == "" {
-		savePath = "downloaded_file"
+	savePath := resolveDownloadPath(outputPath, name)
+	if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
+		return err
 	}
 	out, err := os.Create(savePath)
 	if err != nil {

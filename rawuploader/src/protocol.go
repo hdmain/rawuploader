@@ -653,28 +653,31 @@ func ReadEncryptedBlobNextChunk(r io.Reader, code string) (plaintext []byte, err
 	return decryptChunk(code, nonce[:], sealed)
 }
 
-func ReadEncryptedBlob(r io.Reader, progress ProgressFunc) (name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {
+func ReadEncryptedBlobHeader(r io.Reader) (name string, plaintextChecksum []byte, nonce []byte, sealedLen uint64, err error) {
 	var nameLen uint16
 	if err = binary.Read(r, binary.BigEndian, &nameLen); err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, 0, err
 	}
 	nameBuf := make([]byte, nameLen)
 	if _, err = io.ReadFull(r, nameBuf); err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, 0, err
 	}
 	name = string(nameBuf)
 	plaintextChecksum = make([]byte, sha256.Size)
 	if _, err = io.ReadFull(r, plaintextChecksum); err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, 0, err
 	}
 	nonce = make([]byte, nonceSize)
 	if _, err = io.ReadFull(r, nonce); err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, 0, err
 	}
-	var sealedLen uint64
 	if err = binary.Read(r, binary.BigEndian, &sealedLen); err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, 0, err
 	}
+	return name, plaintextChecksum, nonce, sealedLen, nil
+}
+
+func ReadEncryptedBlobBody(r io.Reader, sealedLen uint64, progress ProgressFunc) (sealed []byte, err error) {
 	sealed = make([]byte, 0, sealedLen)
 	total := int64(sealedLen)
 	var read int64
@@ -685,13 +688,25 @@ func ReadEncryptedBlob(r io.Reader, progress ProgressFunc) (name string, plainte
 		}
 		chunk := make([]byte, n)
 		if _, err = io.ReadFull(r, chunk); err != nil {
-			return "", nil, nil, nil, err
+			return nil, err
 		}
 		sealed = append(sealed, chunk...)
 		read += int64(n)
 		if progress != nil {
 			progress(read, total)
 		}
+	}
+	return sealed, nil
+}
+
+func ReadEncryptedBlob(r io.Reader, progress ProgressFunc) (name string, plaintextChecksum []byte, nonce, sealed []byte, err error) {
+	name, plaintextChecksum, nonce, sealedLen, err := ReadEncryptedBlobHeader(r)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	sealed, err = ReadEncryptedBlobBody(r, sealedLen, progress)
+	if err != nil {
+		return "", nil, nil, nil, err
 	}
 	return name, plaintextChecksum, nonce, sealed, nil
 }

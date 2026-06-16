@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,86 +10,6 @@ import (
 	"strings"
 	"time"
 )
-
-type secureSendArgs struct {
-	file               string
-	addr               string
-	serverID           int
-	storageDurationSec uint32
-	zip                bool
-}
-
-func parseSecureSendArgs(raw []string) secureSendArgs {
-	var out secureSendArgs
-	out.serverID = -1
-	var positional []string
-	for i := 0; i < len(raw); i++ {
-		s := raw[i]
-		if s == "-server" && i+1 < len(raw) {
-			id, _ := strconv.Atoi(raw[i+1])
-			if id >= 0 && id <= 9 {
-				out.serverID = id
-			}
-			i++
-			continue
-		}
-		if strings.HasPrefix(s, "-server=") {
-			id, _ := strconv.Atoi(strings.TrimPrefix(s, "-server="))
-			if id >= 0 && id <= 9 {
-				out.serverID = id
-			}
-			continue
-		}
-		if strings.HasPrefix(s, "-longterm=") {
-			v := strings.TrimSpace(strings.TrimPrefix(s, "-longterm="))
-			if v != "" {
-				sec, _ := parseLongTermDuration(v)
-				out.storageDurationSec = sec
-			}
-			continue
-		}
-		if s == "-zip" {
-			out.zip = true
-			continue
-		}
-		positional = append(positional, s)
-	}
-	if len(positional) >= 1 {
-		out.file = positional[0]
-	}
-	if len(positional) >= 2 {
-		out.addr = positional[1]
-	}
-	return out
-}
-
-// parseLongTermDuration parses e.g. "7d", "24h" to seconds. Max 30 days. Returns 0 if invalid.
-func parseLongTermDuration(s string) (uint32, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, nil
-	}
-	var mult time.Duration
-	if strings.HasSuffix(s, "d") {
-		mult = 24 * time.Hour
-		s = s[:len(s)-1]
-	} else if strings.HasSuffix(s, "h") {
-		mult = time.Hour
-		s = s[:len(s)-1]
-	} else {
-		return 0, fmt.Errorf("long-term: use e.g. 7d or 24h")
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("long-term: positive number required")
-	}
-	d := time.Duration(n) * mult
-	max := 30 * 24 * time.Hour
-	if d > max {
-		d = max
-	}
-	return uint32(d.Seconds()), nil
-}
 
 const (
 	primaryVersionURL = "https://pastebin.com/raw/NLpgn2Re"
@@ -110,183 +29,54 @@ var (
 )
 
 func main() {
-	serverCmd := flag.NewFlagSet("server", flag.ExitOnError)
-	serverID := serverCmd.Int("id", 0, "server id 0–9 (first digit of generated codes)")
-	serverPort := serverCmd.String("port", "9999", "listen port")
-	serverDir := serverCmd.String("dir", "./data", "directory for stored encrypted blobs")
-	serverWeb := serverCmd.String("web", "", "web port for browser download page (e.g. 8080); empty = disabled")
-	serverMaxSizeMB := serverCmd.Int64("maxsize", 0, "max upload size in MB (0 = use default from code)")
-	serverLongTerm := serverCmd.Bool("longterm", false, "allow long-term storage (client -longterm=e.g. 7d; max 150 MB)")
-
-	clientSendCmd := flag.NewFlagSet("send", flag.ExitOnError)
-	clientSendServerID := clientSendCmd.Int("server", -1, "server id 0–9 to use (default: auto-probe)")
-	clientSendLongTerm := clientSendCmd.String("longterm", "", "store for e.g. 7d or 24h (max 150 MB; server must support -longterm)")
-	clientSendZip := clientSendCmd.Bool("zip", false, "pack file or directory into tar.gz before sending")
-	clientSendLocal := clientSendCmd.Bool("local", false, "local LAN send mode")
-	clientGetCmd := flag.NewFlagSet("get", flag.ExitOnError)
-	clientGetOut := clientGetCmd.String("o", "", "output file (default: name from server)")
-	clientGetUnzip := clientGetCmd.Bool("unzip", false, "after download, extract tar.gz and remove archive")
-
 	if len(os.Args) < 2 {
-		printUsage()
+		printGlobalUsage()
 		printTotalNetworkStorage()
 		printVersionCheck()
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 
-	// Shortcut mode: tcpraw <file> -local
-	if len(os.Args) >= 3 && hasArg(os.Args[1:], "-local") && os.Args[1] != "get" && os.Args[1] != "send" && os.Args[1] != "server" && os.Args[1] != "secure" && os.Args[1] != "servers" {
+	if isHelpArg(os.Args[1]) {
+		printGlobalUsage()
+		os.Exit(exitOK)
+	}
+
+	// Shortcut: tcpraw <file> -l
+	if len(os.Args) >= 3 && hasFlag(os.Args[1:], "-l", "--local") &&
+		os.Args[1] != "get" && os.Args[1] != "send" && os.Args[1] != "server" &&
+		os.Args[1] != "secure" && os.Args[1] != "servers" {
 		if err := runLocalSender(os.Args[1]); err != nil {
-			fmt.Fprintf(os.Stderr, "local: %v\n", err)
-			os.Exit(1)
+			exitCmdError("local", err)
 		}
 		return
 	}
 
 	switch os.Args[1] {
 	case "server":
-		_ = serverCmd.Parse(os.Args[2:])
-		id := *serverID
-		if id < 0 || id > 9 {
-			fmt.Fprintln(os.Stderr, "server id must be 0–9")
-			os.Exit(1)
-		}
-		maxBlob := MaxBlobSize
-		if *serverMaxSizeMB > 0 {
-			maxBlob = *serverMaxSizeMB * 1024 * 1024
-		}
-		if err := runServer(id, *serverPort, *serverDir, *serverWeb, maxBlob, *serverLongTerm); err != nil {
-			fmt.Fprintf(os.Stderr, "server: %v\n", err)
-			os.Exit(1)
-		}
+		runServerCommand(os.Args[2:])
 	case "send":
-		_ = clientSendCmd.Parse(os.Args[2:])
-		args := clientSendCmd.Args()
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw send <file> [host:port]")
-			os.Exit(1)
-		}
-		if *clientSendLocal {
-			if err := runLocalSender(args[0]); err != nil {
-				fmt.Fprintf(os.Stderr, "local: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
-		addr := ""
-		if len(args) >= 2 {
-			addr = args[1]
-		}
-		longTermSec := uint32(0)
-		if *clientSendLongTerm != "" {
-			sec, err := parseLongTermDuration(*clientSendLongTerm)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "client: %v\n", err)
-				os.Exit(1)
-			}
-			longTermSec = sec
-		}
-		sendPath, cleanup, err := prepareSendPath(args[0], *clientSendZip)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "client: %v\n", err)
-			os.Exit(1)
-		}
-		if cleanup != nil {
-			defer cleanup()
-		}
-		if err := runClientSend(sendPath, addr, *clientSendServerID, longTermSec); err != nil {
-			fmt.Fprintf(os.Stderr, "client: %v\n", err)
-			os.Exit(1)
-		}
+		runSendCommand(os.Args[2:])
 	case "get":
-		// Extract -o/--output from any position (flag.Parse stops at first non-flag)
-		getArgs := os.Args[2:]
-		var getOutput string
-		var getUnzip bool
-		var getPositional []string
-		getLocal := false
-		for i := 0; i < len(getArgs); i++ {
-			switch getArgs[i] {
-			case "-o", "--output":
-				if i+1 < len(getArgs) {
-					getOutput = getArgs[i+1]
-					i++
-				}
-				continue
-			case "-unzip":
-				getUnzip = true
-				continue
-			case "-local":
-				getLocal = true
-				continue
-			}
-			getPositional = append(getPositional, getArgs[i])
-		}
-		if getLocal {
-			if err := runLocalReceiver(); err != nil {
-				fmt.Fprintf(os.Stderr, "local: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
-		_ = clientGetCmd.Parse(getPositional)
-		if *clientGetUnzip {
-			getUnzip = true
-		}
-		args := clientGetCmd.Args()
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw get <6-digit-code> [-o file] [-unzip]")
-			os.Exit(1)
-		}
-		code := args[0]
-		outPath := getOutput
-		if outPath == "" {
-			outPath = *clientGetOut
-		}
-		if err := runClientGet(code, outPath, getUnzip); err != nil {
-			fmt.Fprintf(os.Stderr, "client: %v\n", err)
-			os.Exit(1)
-		}
+		runGetCommand(os.Args[2:])
 	case "servers":
-		if err := runClientServers(); err != nil {
-			fmt.Fprintf(os.Stderr, "servers: %v\n", err)
-			os.Exit(1)
-		}
+		runServersCommand(os.Args[2:])
 	case "secure":
 		if len(os.Args) < 3 {
-			printUsage()
-			printTotalNetworkStorage()
-			printVersionCheck()
-			os.Exit(1)
+			exitUsageMsg("secure requires a subcommand (use: %s secure send)", progName())
+		}
+		if isHelpArg(os.Args[2]) {
+			printSecureSendUsage()
+			os.Exit(exitOK)
 		}
 		if os.Args[2] != "send" {
-			printUsage()
-			printTotalNetworkStorage()
-			printVersionCheck()
-			os.Exit(1)
+			exitUsageMsg("unknown secure subcommand %q (use: %s secure send)", os.Args[2], progName())
 		}
-		args := parseSecureSendArgs(os.Args[3:])
-		if args.file == "" {
-			fmt.Fprintln(os.Stderr, "usage: tcpraw secure send <file> [host:port]")
-			os.Exit(1)
-		}
-		sendPath, cleanup, err := prepareSendPath(args.file, args.zip)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "client: %v\n", err)
-			os.Exit(1)
-		}
-		if cleanup != nil {
-			defer cleanup()
-		}
-		if err := runClientSecureSend(sendPath, args.addr, args.serverID, args.storageDurationSec); err != nil {
-			fmt.Fprintf(os.Stderr, "client: %v\n", err)
-			os.Exit(1)
-		}
+		runSecureSendCommand(os.Args[3:])
 	default:
-		printUsage()
+		printGlobalUsage()
 		printTotalNetworkStorage()
 		printVersionCheck()
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 }
 
@@ -315,7 +105,6 @@ func printVersionCheck() {
 func fetchRemoteVersion(timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	// Try primary (Pastebin) first, then fall back to GitHub raw.
 	tryOnce := func(url string) (string, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -359,46 +148,6 @@ func versionLess(a, b string) bool {
 		}
 		if na > nb {
 			return false
-		}
-	}
-	return false
-}
-
-func printUsage() {
-	fmt.Println("tcpraw – TCP file send/receive; client generates 6-digit code, data encrypted on server")
-	fmt.Println()
-	fmt.Println("  server  – listen for uploads; store encrypted data")
-	fmt.Println("  servers – test each server: ping, free space, 2s download & 2s upload")
-	fmt.Println("  send    – generate code, encrypt file, upload; you get the 6-digit code")
-	fmt.Println("  get     – download by code; decrypt with same code (or with key for secure uploads)")
-	fmt.Println("  secure send – encrypt with your own 256-bit key; server assigns code; use get + key to download")
-	fmt.Println()
-	fmt.Println("Usage:")
-	fmt.Println("  tcpraw server [-id=0] [-port=9999] [-dir=./data] [-web=8080] [-maxsize=0]")
-	fmt.Println("    -id=ID       server id 0–9 (first digit of generated codes); default 0")
-	fmt.Println("    -web=PORT    serve download page in browser (no client needed)")
-	fmt.Println("    -maxsize=MB  max upload size in MB (0 = default from code)")
-	fmt.Println("  tcpraw send [-server=0-9] [-local] <file> [host:port]   (-server = use that server id; host:port = override)")
-	fmt.Println("  tcpraw secure send [-server=0-9] <file> [host:port]")
-	fmt.Println("  tcpraw get <6-digit-code> [-o file]")
-	fmt.Println("  tcpraw <file> -local")
-	fmt.Println("  tcpraw get -local")
-	fmt.Println("  tcpraw servers   (benchmark each server: 2s download, 2s upload of random data)")
-	fmt.Println()
-	fmt.Println("Servers are read from the address list (first digit of code = server id).")
-	fmt.Printf("Data kept %v, cleanup every %v, max upload %d MB, rate limit %d codes/%v then %v ban\n",
-		StorageDuration, CleanupInterval, MaxBlobSize/(1024*1024), RateLimitAttempts, RateLimitWindow, BanDuration)
-	fmt.Println()
-	fmt.Println("Example:")
-	fmt.Println("  tcpraw server -port=9999")
-	fmt.Println("  tcpraw send document.pdf")
-	fmt.Println("  tcpraw get 482917 -o myfile.pdf")
-}
-
-func hasArg(args []string, flag string) bool {
-	for _, a := range args {
-		if a == flag {
-			return true
 		}
 	}
 	return false

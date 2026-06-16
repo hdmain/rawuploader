@@ -15,8 +15,13 @@ tcprawuplug/.git/
 rawuploader/.git/
 
 # --- Go (manual / local CI-style builds in src/) ---
+src/tcpraw
+src/tcpraw.exe
 src/tcpraw-linux-amd64
 src/tcpraw-windows-amd64.exe
+src/tcpraw_*_amd64.deb
+rawuploader/src/tcpraw
+rawuploader/src/tcpraw.exe
 
 # --- OS / editor ---
 .DS_Store

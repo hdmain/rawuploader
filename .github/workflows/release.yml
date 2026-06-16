@@ -42,6 +42,56 @@ jobs:
           name: ${{ matrix.asset }}
           path: src/${{ matrix.asset }}
 
+  package-deb:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+
+      - name: Build Linux binary
+        run: |
+          set -euo pipefail
+          go build -trimpath -ldflags="-s -w" -o tcpraw .
+
+      - name: Build Debian package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [ "$version" = "$GITHUB_REF_NAME" ]; then
+            version="0.0.0+${GITHUB_RUN_NUMBER}"
+          fi
+
+          pkg="tcpraw_${version}_amd64"
+          rm -rf "$pkg"
+          install -Dm755 tcpraw "$pkg/usr/bin/tcpraw"
+          install -Dm644 ../README.md "$pkg/usr/share/doc/tcpraw/README.md"
+          install -d "$pkg/DEBIAN"
+
+          cat > "$pkg/DEBIAN/control" <<EOF
+          Package: tcpraw
+          Version: $version
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: hdmain <noreply@github.com>
+          Description: TCP file send/receive with encrypted 6-digit codes
+           tcpraw sends and receives files over TCP using client-side encryption.
+          EOF
+
+          dpkg-deb --build "$pkg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tcpraw-deb
+          path: src/tcpraw_*_amd64.deb
+
   package-vsix:
     runs-on: ubuntu-latest
     defaults:
@@ -68,7 +118,7 @@ jobs:
           path: tcprawuplug/tcprawuplug-*.vsix
 
   release:
-    needs: [build, package-vsix]
+    needs: [build, package-deb, package-vsix]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -83,3 +133,49 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-apt:
+    needs: package-deb
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tcpraw-deb
+          path: public
+
+      - name: Build APT repository index
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+
+          cd public
+          dpkg-scanpackages --multiversion . /dev/null > Packages
+          gzip -9fk Packages
+
+          cat > index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>tcpraw APT repository</title>
+          </head>
+          <body>
+            <h1>tcpraw APT repository</h1>
+            <pre><code>echo "deb [trusted=yes] https://hdmain.github.io/rawuploader ./" \
+            | sudo tee /etc/apt/sources.list.d/tcpraw.list
+          sudo apt update
+          sudo apt install tcpraw</code></pre>
+          </body>
+          </html>
+          EOF
+
+      - name: Publish GitHub Pages APT repository
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: public
+          force_orphan: true

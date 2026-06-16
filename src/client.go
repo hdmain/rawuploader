@@ -85,7 +85,7 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 			line, _ := rd.ReadString('\n')
 			line = strings.TrimSpace(strings.ToLower(line))
 			if line != "y" && line != "yes" {
-				return "", nil, fmt.Errorf("cannot send directory (use -zip to pack)")
+				return "", nil, fmt.Errorf("cannot send directory (use -z or --zip to pack)")
 			}
 		}
 		tmp, err := os.CreateTemp("", "tcpraw-*.tar.gz")
@@ -352,9 +352,9 @@ func tryServersFromList(fileSize int64) (net.Conn, int, error) {
 		return nil, 0, fmt.Errorf("fetch server list: %w", err)
 	}
 
-	fileSizeU := uint64(fileSize)
-	if fileSizeU < 0 {
-		fileSizeU = 0
+	var fileSizeU uint64
+	if fileSize > 0 {
+		fileSizeU = uint64(fileSize)
 	}
 
 	type cand struct {

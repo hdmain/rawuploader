@@ -148,11 +148,21 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev
+          sudo apt-get install -y apt-utils dpkg-dev xz-utils
 
           cd public
           dpkg-scanpackages --multiversion . /dev/null > Packages
           gzip -9fk Packages
+          xz -9fk Packages
+
+          # APT probes translation indexes by default. Empty files keep
+          # `apt update` quiet for this simple flat repository.
+          : > Translation-en
+          : > Translation-en_US
+          gzip -9fk Translation-en Translation-en_US
+          xz -9fk Translation-en Translation-en_US
+
+          apt-ftparchive release . > Release
 
           cat > index.html <<'EOF'
           <!doctype html>

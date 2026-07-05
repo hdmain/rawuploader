@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,7 @@ type ipfsJob struct {
 	Code      string
 	State     byte
 	CID       string
+	Filename  string
 	URL       string
 	Error     string
 	CreatedAt time.Time
@@ -242,7 +244,7 @@ func (m *ipfsManager) uploadAndPin(st *store, code string) {
 		return
 	}
 
-	cid, err := m.addFile(tmpPath, blob.Name)
+	cid, err := m.addFileWrapped(tmpPath, blob.Name)
 	if err != nil {
 		j.State = IPFSStateFailed
 		j.Error = err.Error()
@@ -260,7 +262,8 @@ func (m *ipfsManager) uploadAndPin(st *store, code string) {
 	now := time.Now()
 	j.State = IPFSStatePinned
 	j.CID = cid
-	j.URL = IPFSGatewayBase + cid
+	j.Filename = blob.Name
+	j.URL = ipfsDownloadURL(cid, blob.Name)
 	j.PinnedAt = now
 	j.ExpiresAt = now.Add(IPFSPinDuration)
 	j.Error = ""
@@ -268,16 +271,29 @@ func (m *ipfsManager) uploadAndPin(st *store, code string) {
 	fmt.Printf("IPFS: pinned %s (code %s) CID %s, expires %v\n", blob.Name, code, cid, j.ExpiresAt.Format("15:04:05"))
 }
 
-func (m *ipfsManager) addFile(path, filename string) (string, error) {
+func ipfsDownloadURL(dirCID, filename string) string {
+	safeName := filepath.Base(filename)
+	if safeName == "" || safeName == "." {
+		safeName = "download"
+	}
+	return IPFSGatewayBase + dirCID + "/" + url.PathEscape(safeName)
+}
+
+func (m *ipfsManager) addFileWrapped(path, filename string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 
+	safeName := filepath.Base(filename)
+	if safeName == "" || safeName == "." {
+		safeName = "download"
+	}
+
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
-	part, err := w.CreateFormFile("file", filename)
+	part, err := w.CreateFormFile("file", safeName)
 	if err != nil {
 		return "", err
 	}
@@ -287,7 +303,7 @@ func (m *ipfsManager) addFile(path, filename string) (string, error) {
 	w.Close()
 
 	client := &http.Client{Timeout: 0}
-	req, err := http.NewRequest(http.MethodPost, m.apiURL+"/api/v0/add?pin=false", &body)
+	req, err := http.NewRequest(http.MethodPost, m.apiURL+"/api/v0/add?pin=false&wrap-with-directory=true", &body)
 	if err != nil {
 		return "", err
 	}
@@ -297,22 +313,38 @@ func (m *ipfsManager) addFile(path, filename string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("ipfs add HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("ipfs add HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	var result struct {
-		Hash string `json:"Hash"`
-		Name string `json:"Name"`
+	return parseWrappedAddResponse(respBody)
+}
+
+func parseWrappedAddResponse(body []byte) (string, error) {
+	var dirCID string
+	for _, line := range bytes.Split(bytes.TrimSpace(body), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var result struct {
+			Hash string `json:"Hash"`
+			Name string `json:"Name"`
+		}
+		if err := json.Unmarshal(line, &result); err != nil {
+			return "", fmt.Errorf("parse ipfs add response: %w", err)
+		}
+		if result.Hash == "" {
+			continue
+		}
+		dirCID = result.Hash
 	}
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&result); err != nil {
-		return "", fmt.Errorf("parse ipfs add response: %w", err)
-	}
-	if result.Hash == "" {
+	if dirCID == "" {
 		return "", fmt.Errorf("ipfs add returned empty CID")
 	}
-	return result.Hash, nil
+	return dirCID, nil
 }
 
 func (m *ipfsManager) pin(cid string) error {

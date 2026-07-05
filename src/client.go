@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1364,7 +1365,7 @@ func runClientIPFSStatus(code string) error {
 		return err
 	}
 
-	status, ipfsState, cid, url, errMsg, err := ReadIPFSStatusResponse(conn)
+	status, ipfsState, cid, link, errMsg, err := ReadIPFSStatusResponse(conn)
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
@@ -1383,8 +1384,13 @@ func runClientIPFSStatus(code string) error {
 	fmt.Printf("Status: %s\n", ipfsStateLabel(ipfsState))
 	switch ipfsState {
 	case IPFSStatePinned:
+		if u, parseErr := url.Parse(link); parseErr == nil {
+			if name := filepath.Base(u.Path); name != "" && name != "." && name != "/" {
+				fmt.Printf("File:   %s\n", name)
+			}
+		}
 		fmt.Printf("CID:    %s\n", cid)
-		fmt.Printf("Link:   %s\n", url)
+		fmt.Printf("Link:   %s\n", link)
 	case IPFSStateFailed:
 		if errMsg != "" {
 			fmt.Printf("Error:  %s\n", errMsg)

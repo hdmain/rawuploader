@@ -783,12 +783,14 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 	plaintextChecksum := hasher.Sum(nil)
 	var conn net.Conn
 	var serverID int
+	var serverAddr string
 	if addr != "" {
 		var err error
 		conn, err = dialWithFallback(addr)
 		if err != nil {
 			return err
 		}
+		serverAddr = addr
 		serverID = 0
 	} else if serverIDHint >= 0 && serverIDHint <= 9 {
 		addrs, fetchErr := fetchServerList()
@@ -799,7 +801,8 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 			return fmt.Errorf("server %d not in list", serverIDHint)
 		}
 		var err error
-		conn, err = net.DialTimeout("tcp", addrs[serverIDHint], dialTimeout)
+		serverAddr = addrs[serverIDHint]
+		conn, err = net.DialTimeout("tcp", serverAddr, dialTimeout)
 		if err != nil {
 			return err
 		}
@@ -812,6 +815,11 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 		if err != nil {
 			return err
 		}
+		addrs, fetchErr := fetchServerList()
+		if fetchErr != nil {
+			return fmt.Errorf("fetch server list: %w", fetchErr)
+		}
+		serverAddr = addrs[serverID]
 	}
 	defer conn.Close()
 	code := generateCodeWithServerID(serverID)
@@ -865,7 +873,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 	case StatusOK:
 		fmt.Printf("File sent (encrypted). Your code: %s (%s)\n", code, formatValidDuration(storageDurationSec))
 		if ipfsMirror {
-			if err := requestIPFSMirror(conn, code); err != nil {
+			if err := requestIPFSMirror(serverAddr, code); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: IPFS mirror request failed: %v\n", err)
 				fmt.Println("Use: tcpraw status", code, "to check IPFS upload later")
 			} else {
@@ -1294,7 +1302,12 @@ func runClientGet(code, outputPath string, unzip bool) error {
 	return nil
 }
 
-func requestIPFSMirror(conn net.Conn, code string) error {
+func requestIPFSMirror(serverAddr, code string) error {
+	conn, err := dialWithFallback(serverAddr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 	bw := bufio.NewWriterSize(conn, bufSize)
 	if err := WriteMessageType(bw, MsgIPFSRequest); err != nil {
 		return err

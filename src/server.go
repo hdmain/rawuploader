@@ -433,6 +433,7 @@ func handleIPFSRequest(conn net.Conn, r io.Reader, st *store, ipfs *ipfsManager)
 		SendStatus(conn, StatusError)
 		return
 	}
+	fmt.Printf("IPFS mirror queued for code %s\n", code)
 	SendStatus(conn, StatusOK)
 }
 

@@ -17,7 +17,7 @@ const (
 )
 
 // Version – change only here; remote check uses GitHub raw version file.
-var Version = "1.2.2"
+var Version = "1.3.0"
 
 var (
 	StorageDuration   = 30 * time.Minute
@@ -44,7 +44,7 @@ func main() {
 	// Shortcut: tcpraw <file> -l
 	if len(os.Args) >= 3 && hasFlag(os.Args[1:], "-l", "--local") &&
 		os.Args[1] != "get" && os.Args[1] != "send" && os.Args[1] != "server" &&
-		os.Args[1] != "secure" && os.Args[1] != "servers" {
+		os.Args[1] != "secure" && os.Args[1] != "servers" && os.Args[1] != "status" {
 		if err := runLocalSender(os.Args[1]); err != nil {
 			exitCmdError("local", err)
 		}
@@ -60,6 +60,8 @@ func main() {
 		runGetCommand(os.Args[2:])
 	case "servers":
 		runServersCommand(os.Args[2:])
+	case "status":
+		runStatusCommand(os.Args[2:])
 	case "secure":
 		if len(os.Args) < 3 {
 			exitUsageMsg("secure requires a subcommand (use: %s secure send)", progName())

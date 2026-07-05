@@ -745,7 +745,7 @@ func generateCodeWithServerID(serverID int) string {
 	return fmt.Sprintf("%d%05d", serverID, rand.Intn(100000))
 }
 
-func runClientSend(filePath string, addr string, serverIDHint int, storageDurationSec uint32) error {
+func runClientSend(filePath string, addr string, serverIDHint int, storageDurationSec uint32, ipfsMirror bool) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
@@ -864,6 +864,14 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 	switch status {
 	case StatusOK:
 		fmt.Printf("File sent (encrypted). Your code: %s (%s)\n", code, formatValidDuration(storageDurationSec))
+		if ipfsMirror {
+			if err := requestIPFSMirror(conn, code); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: IPFS mirror request failed: %v\n", err)
+				fmt.Println("Use: tcpraw status", code, "to check IPFS upload later")
+			} else {
+				fmt.Println("IPFS mirror queued. Check status with: tcpraw status", code)
+			}
+		}
 		return nil
 	case StatusError:
 		return fmt.Errorf("server error")
@@ -1282,6 +1290,96 @@ func runClientGet(code, outputPath string, unzip bool) error {
 			return fmt.Errorf("unzip: %w", err)
 		}
 		fmt.Println("Extracted archive.")
+	}
+	return nil
+}
+
+func requestIPFSMirror(conn net.Conn, code string) error {
+	bw := bufio.NewWriterSize(conn, bufSize)
+	if err := WriteMessageType(bw, MsgIPFSRequest); err != nil {
+		return err
+	}
+	if err := WriteIPFSCodeRequest(bw, code); err != nil {
+		return err
+	}
+	if err := bw.Flush(); err != nil {
+		return err
+	}
+	status, err := ReadStatus(conn)
+	if err != nil {
+		return err
+	}
+	switch status {
+	case StatusOK:
+		return nil
+	case StatusNotFound:
+		return fmt.Errorf("code not found on server")
+	default:
+		return fmt.Errorf("server rejected IPFS mirror (status %d)", status)
+	}
+}
+
+func runClientIPFSStatus(code string) error {
+	if len(code) != CodeLength {
+		return fmt.Errorf("code must be 6 digits")
+	}
+	serverID := int(code[0] - '0')
+	if serverID < 0 || serverID > 9 {
+		return fmt.Errorf("invalid code: first digit must be 0–9 (server id)")
+	}
+	addrs, err := fetchServerList()
+	if err != nil {
+		return fmt.Errorf("fetch server list: %w", err)
+	}
+	if addrs[serverID] == "" {
+		return fmt.Errorf("server %d not in list", serverID)
+	}
+	conn, err := dialWithFallback(addrs[serverID])
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	bw := bufio.NewWriterSize(conn, bufSize)
+	if err := WriteMessageType(bw, MsgIPFSStatus); err != nil {
+		return err
+	}
+	if err := WriteIPFSCodeRequest(bw, code); err != nil {
+		return err
+	}
+	if err := bw.Flush(); err != nil {
+		return err
+	}
+
+	status, ipfsState, cid, url, errMsg, err := ReadIPFSStatusResponse(conn)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if status == StatusNotFound {
+		fmt.Printf("Code %s: no IPFS upload requested\n", code)
+		return nil
+	}
+	if status != StatusOK {
+		if errMsg != "" {
+			return fmt.Errorf("%s", errMsg)
+		}
+		return fmt.Errorf("server error (status %d)", status)
+	}
+
+	fmt.Printf("Code:   %s\n", code)
+	fmt.Printf("Status: %s\n", ipfsStateLabel(ipfsState))
+	switch ipfsState {
+	case IPFSStatePinned:
+		fmt.Printf("CID:    %s\n", cid)
+		fmt.Printf("Link:   %s\n", url)
+	case IPFSStateFailed:
+		if errMsg != "" {
+			fmt.Printf("Error:  %s\n", errMsg)
+		}
+	case IPFSStateQueued, IPFSStateUploading:
+		fmt.Println("Upload in progress. Run again in a few seconds.")
+	case IPFSStateExpired:
+		fmt.Println("IPFS pin expired (removed after 30 min).")
 	}
 	return nil
 }

@@ -279,11 +279,24 @@ func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize 
 	if err != nil {
 		return err
 	}
+
+	ipfs := newIPFSManager(dataDir)
+	if err := ipfs.loadIndex(); err != nil {
+		fmt.Fprintf(os.Stderr, "tcpraw server: load IPFS index: %v\n", err)
+	}
+	if err := ipfs.initAndStart(); err != nil {
+		fmt.Fprintf(os.Stderr, "tcpraw server: IPFS init/start failed: %v (IPFS mirror disabled)\n", err)
+		ipfs = nil
+	}
+
 	go func() {
 		tick := time.NewTicker(CleanupInterval)
 		defer tick.Stop()
 		for range tick.C {
 			st.cleanupExpired()
+			if ipfs != nil {
+				ipfs.cleanupExpired()
+			}
 		}
 	}()
 
@@ -308,7 +321,7 @@ func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize 
 			fmt.Fprintf(os.Stderr, "accept: %v\n", err)
 			continue
 		}
-		go handleConn(conn, st, rl, serverID)
+		go handleConn(conn, st, rl, serverID, ipfs)
 	}
 }
 
@@ -367,7 +380,7 @@ func extractIP(addr string) string {
 	return addr
 }
 
-func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
+func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int, ipfs *ipfsManager) {
 	defer conn.Close()
 	setTCPBuffers(conn)
 	r := bufio.NewReaderSize(conn, bufSize)
@@ -391,10 +404,104 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
 		handleTest(conn, r, st)
 	case MsgBench:
 		handleBench(conn, r, st)
+	case MsgIPFSRequest:
+		handleIPFSRequest(conn, r, st, ipfs)
+	case MsgIPFSStatus:
+		handleIPFSStatus(conn, r, ipfs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown type: %c\n", msgType)
 		SendStatus(conn, StatusError)
 	}
+}
+
+func handleIPFSRequest(conn net.Conn, r io.Reader, st *store, ipfs *ipfsManager) {
+	if ipfs == nil {
+		SendStatus(conn, StatusError)
+		return
+	}
+	code, err := ReadIPFSCodeRequest(r)
+	if err != nil {
+		SendStatus(conn, StatusError)
+		return
+	}
+	if _, ok := st.get(code); !ok {
+		SendStatus(conn, StatusNotFound)
+		return
+	}
+	if err := ipfs.queueUpload(st, code); err != nil {
+		fmt.Fprintf(os.Stderr, "IPFS queue %s: %v\n", code, err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	SendStatus(conn, StatusOK)
+}
+
+func handleIPFSStatus(conn net.Conn, r io.Reader, ipfs *ipfsManager) {
+	code, err := ReadIPFSCodeRequest(r)
+	if err != nil {
+		SendStatus(conn, StatusError)
+		return
+	}
+	if ipfs == nil {
+		_ = SendIPFSStatusResponse(conn, StatusError, IPFSStateNone, "", "", "IPFS not available on this server")
+		return
+	}
+	j, ok := ipfs.getJob(code)
+	if !ok {
+		_ = SendIPFSStatusResponse(conn, StatusNotFound, IPFSStateNone, "", "", "")
+		return
+	}
+	_ = SendIPFSStatusResponse(conn, StatusOK, j.State, j.CID, j.URL, j.Error)
+}
+
+func decryptBlobToWriter(st *store, code string, blob *StoredBlob, w io.Writer) error {
+	if blob.Chunked {
+		df, err := os.Open(st.dataPath(code))
+		if err != nil {
+			return err
+		}
+		defer df.Close()
+		for i := uint32(0); i < blob.NumChunks; i++ {
+			var nonce [12]byte
+			if _, err := io.ReadFull(df, nonce[:]); err != nil {
+				return err
+			}
+			var sealedLen uint32
+			if err := binary.Read(df, binary.BigEndian, &sealedLen); err != nil {
+				return err
+			}
+			sealed := make([]byte, sealedLen)
+			if _, err := io.ReadFull(df, sealed); err != nil {
+				return err
+			}
+			pt, err := decryptChunk(code, nonce[:], sealed)
+			if err != nil {
+				return err
+			}
+			if _, err := w.Write(pt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if blob.Chunks != nil {
+		for _, c := range blob.Chunks {
+			pt, err := decryptChunk(code, c.Nonce[:], c.Sealed)
+			if err != nil {
+				return err
+			}
+			if _, err := w.Write(pt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	pt, err := decryptWithCode(code, blob.Nonce, blob.Sealed)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(pt)
+	return err
 }
 
 func handleTest(conn net.Conn, r io.Reader, st *store) {

@@ -93,7 +93,7 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 		if err != nil {
 			return "", nil, fmt.Errorf("create temp: %w", err)
 		}
-		fmt.Printf("info: compressing using %d CPU cores...\n", runtime.NumCPU())
+		printSendPhase(fmt.Sprintf("Compressing with %d CPU cores…", runtime.NumCPU()))
 		gz, err := newParallelGzipWriter(tmp)
 		if err != nil {
 			tmp.Close()
@@ -166,7 +166,7 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 		if err != nil {
 			return "", nil, fmt.Errorf("create temp: %w", err)
 		}
-		fmt.Printf("info: compressing using %d CPU cores...\n", runtime.NumCPU())
+		printSendPhase(fmt.Sprintf("Compressing with %d CPU cores…", runtime.NumCPU()))
 		gz, err := newParallelGzipWriter(tmp)
 		if err != nil {
 			tmp.Close()
@@ -765,30 +765,40 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 		return fmt.Errorf("long-term uploads limited to %d MB", LongTermMaxBytes/(1024*1024))
 	}
 
+	baseName := filepath.Base(filePath)
+	ui := newSendUI(baseName, size)
+
 	hasher := sha256.New()
 	chunkBuf := make([]byte, FileChunkSize)
+	ui.Status("checksum")
+	ui.beginTransfer()
 	var totalRead int64
 	for totalRead < size {
 		n, err := f.Read(chunkBuf)
 		if n > 0 {
 			hasher.Write(chunkBuf[:n])
 			totalRead += int64(n)
+			ui.Progress("checksum", totalRead, size)
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			ui.Fail()
 			return fmt.Errorf("read file: %w", err)
 		}
 	}
+	ui.FinishProgress(size)
 	plaintextChecksum := hasher.Sum(nil)
 	var conn net.Conn
 	var serverID int
 	var serverAddr string
 	if addr != "" {
+		ui.Status("connect " + addr)
 		var err error
 		conn, err = dialWithFallback(addr)
 		if err != nil {
+			ui.Fail()
 			return err
 		}
 		serverAddr = addr
@@ -796,54 +806,56 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 	} else if serverIDHint >= 0 && serverIDHint <= 9 {
 		addrs, fetchErr := fetchServerList()
 		if fetchErr != nil {
+			ui.Fail()
 			return fmt.Errorf("fetch server list: %w", fetchErr)
 		}
 		if addrs[serverIDHint] == "" {
+			ui.Fail()
 			return fmt.Errorf("server %d not in list", serverIDHint)
 		}
 		var err error
 		serverAddr = addrs[serverIDHint]
+		ui.Status(fmt.Sprintf("connect #%d", serverIDHint))
 		conn, err = net.DialTimeout("tcp", serverAddr, dialTimeout)
 		if err != nil {
+			ui.Fail()
 			return err
 		}
 		setTCPBuffers(conn)
 		serverID = serverIDHint
 	} else {
-		fmt.Println("info: probing servers (disk space + 256 KiB upload sample per server)...")
+		ui.Status("probing")
 		var err error
 		conn, serverID, err = tryServersFromList(size)
 		if err != nil {
+			ui.Fail()
 			return err
 		}
 		addrs, fetchErr := fetchServerList()
 		if fetchErr != nil {
+			ui.Fail()
 			return fmt.Errorf("fetch server list: %w", fetchErr)
 		}
 		serverAddr = addrs[serverID]
+		ui.Status(fmt.Sprintf("server #%d", serverID))
 	}
 	defer conn.Close()
 	code := generateCodeWithServerID(serverID)
 	numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		ui.Fail()
 		return fmt.Errorf("seek file: %w", err)
 	}
 
 	bw := bufio.NewWriterSize(conn, bufSize)
 	if err := WriteMessageType(bw, MsgUpload); err != nil {
+		ui.Fail()
 		return err
 	}
-	baseName := filepath.Base(filePath)
-	start := time.Now()
+	ui.beginTransfer()
 	progress := func(sent, total int64) {
-		elapsed := time.Since(start).Seconds()
-		if elapsed < 0.001 {
-			return
-		}
-		speed := float64(sent) / elapsed
-		remaining := total - sent
-		fmt.Printf("\r  speed: %s/s  |  sent: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(sent)), formatBytes(float64(remaining)))
+		ui.Progress("upload", sent, total)
 	}
 	getChunk := func() ([]byte, error) {
 		n, err := f.Read(chunkBuf)
@@ -855,36 +867,41 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 		}
 		return nil, io.EOF
 	}
-	fmt.Println("info: encrypting and sending in chunks...")
 	if err := WriteEncryptedUploadChunked(bw, code, baseName, size, storageDurationSec, numChunks, plaintextChecksum, getChunk, progress); err != nil {
+		ui.Fail()
 		return fmt.Errorf("send: %w", err)
 	}
-	fmt.Println()
+	ui.FinishProgress(size)
 	if err := bw.Flush(); err != nil {
+		ui.Fail()
 		return fmt.Errorf("flush: %w", err)
 	}
 
-	fmt.Println("info: waiting for server...")
+	ui.Status("confirm")
 	status, err := ReadStatus(conn)
 	if err != nil {
+		ui.Fail()
 		return fmt.Errorf("read response: %w", err)
 	}
 
 	switch status {
 	case StatusOK:
-		fmt.Printf("File sent (encrypted). Your code: %s (%s)\n", code, formatValidDuration(storageDurationSec))
+		ipfsNote := ""
 		if ipfsMirror {
 			if err := requestIPFSMirror(serverAddr, code); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: IPFS mirror request failed: %v\n", err)
-				fmt.Println("Use: tcpraw status", code, "to check IPFS upload later")
+				ipfsNote = "failed · " + progName() + " status " + code
 			} else {
-				fmt.Println("IPFS mirror queued. Check status with: tcpraw status", code)
+				ipfsNote = "queued · " + progName() + " status " + code
 			}
 		}
+		ui.Done(code, storageDurationSec, ipfsNote)
 		return nil
 	case StatusError:
+		ui.Fail()
 		return fmt.Errorf("server error")
 	default:
+		ui.Fail()
 		return fmt.Errorf("unknown status: %d", status)
 	}
 }
@@ -910,148 +927,164 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 		return fmt.Errorf("long-term uploads limited to %d MB", LongTermMaxBytes/(1024*1024))
 	}
 
+	baseName := filepath.Base(filePath)
+	ui := newSendUI(baseName, size)
+	ui.Status("secure")
+
 	key := make([]byte, SecureKeySize)
 	if _, err := io.ReadFull(crand.Reader, key); err != nil {
+		ui.Fail()
 		return fmt.Errorf("generate key: %w", err)
 	}
 
 	var conn net.Conn
 	if addr != "" {
+		ui.Status("connect " + addr)
 		conn, err = dialWithFallback(addr)
 	} else if serverIDHint >= 0 && serverIDHint <= 9 {
 		addrs, fetchErr := fetchServerList()
 		if fetchErr != nil {
+			ui.Fail()
 			return fmt.Errorf("fetch server list: %w", fetchErr)
 		}
 		if addrs[serverIDHint] == "" {
+			ui.Fail()
 			return fmt.Errorf("server %d not in list", serverIDHint)
 		}
+		ui.Status(fmt.Sprintf("connect #%d", serverIDHint))
 		conn, err = net.DialTimeout("tcp", addrs[serverIDHint], dialTimeout)
 		if err != nil {
+			ui.Fail()
 			return err
 		}
 		setTCPBuffers(conn)
 	} else {
-		fmt.Println("info: probing servers (disk space + 256 KiB upload sample per server)...")
+		ui.Status("probing")
 		conn, _, err = tryServersFromList(size)
 	}
 	if err != nil {
+		ui.Fail()
 		return err
 	}
 	defer conn.Close()
 
 	bw := bufio.NewWriterSize(conn, bufSize)
 	if err = WriteMessageType(bw, MsgSecureUpload); err != nil {
+		ui.Fail()
 		return err
 	}
-	baseName := filepath.Base(filePath)
 
 	if size <= maxSecureLoadRAM {
+		ui.Status("encrypt")
 		plaintext, err := io.ReadAll(f)
 		if err != nil {
+			ui.Fail()
 			return fmt.Errorf("read file: %w", err)
 		}
 		plaintextChecksum := sha256.Sum256(plaintext)
 		nonce, sealed, err := encryptWithKey(key, plaintext)
 		if err != nil {
+			ui.Fail()
 			return fmt.Errorf("encrypt: %w", err)
 		}
-		start := time.Now()
+		ui.beginTransfer()
 		progress := func(sent, total int64) {
-			elapsed := time.Since(start).Seconds()
-			if elapsed < 0.001 {
-				return
-			}
-			speed := float64(sent) / elapsed
-			remaining := total - sent
-			fmt.Printf("\r  speed: %s/s  |  sent: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(sent)), formatBytes(float64(remaining)))
+			ui.Progress("upload", sent, total)
 		}
-		fmt.Println("info: sending encrypted file...")
 		if _, err := bw.Write([]byte{0}); err != nil {
+			ui.Fail()
 			return err
 		}
 		if err := binary.Write(bw, binary.BigEndian, storageDurationSec); err != nil {
+			ui.Fail()
 			return fmt.Errorf("write storage duration: %w", err)
 		}
 		if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed, progress); err != nil {
+			ui.Fail()
 			return fmt.Errorf("send: %w", err)
 		}
+		ui.FinishProgress(int64(len(sealed)))
 	} else {
-		fmt.Println("info: sending encrypted file in chunks (streaming, no full load)...")
+		ui.Status("checksum")
 		if _, err := bw.Write([]byte{1}); err != nil {
+			ui.Fail()
 			return err
 		}
 		hasher := sha256.New()
 		chunkBuf := make([]byte, FileChunkSize)
+		ui.beginTransfer()
 		var totalRead int64
 		for totalRead < size {
 			n, err := f.Read(chunkBuf)
 			if n > 0 {
 				hasher.Write(chunkBuf[:n])
 				totalRead += int64(n)
+				ui.Progress("checksum", totalRead, size)
 			}
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
+				ui.Fail()
 				return fmt.Errorf("read file: %w", err)
 			}
 		}
+		ui.FinishProgress(size)
 		plaintextChecksum := hasher.Sum(nil)
 		numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
 		if err := WriteSecureUploadChunkedHeader(bw, baseName, size, storageDurationSec, numChunks, plaintextChecksum); err != nil {
+			ui.Fail()
 			return fmt.Errorf("send header: %w", err)
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			ui.Fail()
 			return fmt.Errorf("seek file: %w", err)
 		}
-		start := time.Now()
+		ui.beginTransfer()
 		var sent int64
 		for sent < size {
 			n, err := f.Read(chunkBuf)
 			if n > 0 {
 				nonce, sealed, encErr := encryptWithKey(key, chunkBuf[:n])
 				if encErr != nil {
+					ui.Fail()
 					return fmt.Errorf("encrypt chunk: %w", encErr)
 				}
 				if err := WriteChunk(bw, nonce, sealed); err != nil {
+					ui.Fail()
 					return fmt.Errorf("write chunk: %w", err)
 				}
 				sent += int64(n)
-				elapsed := time.Since(start).Seconds()
-				if elapsed >= 0.001 {
-					speed := float64(sent) / elapsed
-					remaining := size - sent
-					fmt.Printf("\r  speed: %s/s  |  sent: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(sent)), formatBytes(float64(remaining)))
-				}
+				ui.Progress("upload", sent, size)
 			}
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
+				ui.Fail()
 				return fmt.Errorf("read file: %w", err)
 			}
 		}
-		fmt.Println()
+		ui.FinishProgress(size)
 	}
 
 	if err := bw.Flush(); err != nil {
+		ui.Fail()
 		return fmt.Errorf("flush: %w", err)
 	}
 
-	fmt.Println("info: waiting for server...")
+	ui.Status("confirm")
 	status, code, err := ReadCodeResponse(conn)
 	if err != nil {
+		ui.Fail()
 		return fmt.Errorf("read response: %w", err)
 	}
 	if status != StatusOK {
+		ui.Fail()
 		return fmt.Errorf("server error")
 	}
 
-	fmt.Println()
-	fmt.Printf("Code: %s (%s)\n", code, formatValidDuration(storageDurationSec))
-	fmt.Printf("Key (save it – needed to download): %s\n", hex.EncodeToString(key))
-	fmt.Println("Without the key the file cannot be decrypted.")
+	ui.DoneSecure(code, hex.EncodeToString(key), storageDurationSec)
 	return nil
 }
 

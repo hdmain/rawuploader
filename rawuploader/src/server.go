@@ -279,6 +279,7 @@ func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize 
 	if err != nil {
 		return err
 	}
+
 	go func() {
 		tick := time.NewTicker(CleanupInterval)
 		defer tick.Stop()
@@ -395,6 +396,56 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
 		fmt.Fprintf(os.Stderr, "unknown type: %c\n", msgType)
 		SendStatus(conn, StatusError)
 	}
+}
+
+func decryptBlobToWriter(st *store, code string, blob *StoredBlob, w io.Writer) error {
+	if blob.Chunked {
+		df, err := os.Open(st.dataPath(code))
+		if err != nil {
+			return err
+		}
+		defer df.Close()
+		for i := uint32(0); i < blob.NumChunks; i++ {
+			var nonce [12]byte
+			if _, err := io.ReadFull(df, nonce[:]); err != nil {
+				return err
+			}
+			var sealedLen uint32
+			if err := binary.Read(df, binary.BigEndian, &sealedLen); err != nil {
+				return err
+			}
+			sealed := make([]byte, sealedLen)
+			if _, err := io.ReadFull(df, sealed); err != nil {
+				return err
+			}
+			pt, err := decryptChunk(code, nonce[:], sealed)
+			if err != nil {
+				return err
+			}
+			if _, err := w.Write(pt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if blob.Chunks != nil {
+		for _, c := range blob.Chunks {
+			pt, err := decryptChunk(code, c.Nonce[:], c.Sealed)
+			if err != nil {
+				return err
+			}
+			if _, err := w.Write(pt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	pt, err := decryptWithCode(code, blob.Nonce, blob.Sealed)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(pt)
+	return err
 }
 
 func handleTest(conn net.Conn, r io.Reader, st *store) {

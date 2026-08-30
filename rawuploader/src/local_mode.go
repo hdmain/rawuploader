@@ -59,7 +59,7 @@ func runLocalSender(filePath string) error {
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 	size := info.Size()
-	fmt.Printf("Sharing file: %s (%d bytes)\n", displayName, size)
+	fmt.Printf("Sharing file: %s (%s)\n", displayName, formatBytes(float64(size)))
 
 	// Broadcast announcement a few times so listeners can catch it.
 	for i := 0; i < 3; i++ {
@@ -68,7 +68,7 @@ func runLocalSender(filePath string) error {
 	}
 	deadline := time.Now().Add(2 * time.Minute)
 	_ = ln.(*net.TCPListener).SetDeadline(deadline)
-	fmt.Println("Waiting for local downloads...")
+	printSendPhase("Waiting for local downloads...")
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -93,12 +93,23 @@ func serveLocalFile(conn net.Conn, path, name string, size int64) {
 	if len(nameBytes) > 65535 {
 		nameBytes = nameBytes[:65535]
 	}
+	ui := newSendUI(name, size)
+	ui.Status("send")
 	bw := bufio.NewWriter(conn)
 	_ = binary.Write(bw, binary.BigEndian, uint16(len(nameBytes)))
 	_, _ = bw.Write(nameBytes)
 	_ = binary.Write(bw, binary.BigEndian, uint64(size))
-	_, _ = io.Copy(bw, f)
-	_ = bw.Flush()
+	ui.beginTransfer()
+	if _, err := io.Copy(ui.progressWriter(bw, size), f); err != nil {
+		ui.Fail()
+		return
+	}
+	if err := bw.Flush(); err != nil {
+		ui.Fail()
+		return
+	}
+	ui.FinishProgress(size)
+	ui.DoneShared()
 }
 
 func runLocalReceiver() error {
@@ -203,7 +214,8 @@ func downloadLocalFile(host string, port int, suggestedName string) error {
 		return err
 	}
 	defer out.Close()
-	start := time.Now()
+	ui := newRecvUI(name, int64(size))
+	ui.beginTransfer()
 	var downloaded int64
 	buf := make([]byte, 64*1024)
 	remaining := int64(size)
@@ -215,29 +227,27 @@ func downloadLocalFile(host string, port int, suggestedName string) error {
 		n, readErr := io.ReadFull(br, buf[:nToRead])
 		if n > 0 {
 			if _, err := out.Write(buf[:n]); err != nil {
+				ui.Fail()
 				return err
 			}
 			downloaded += int64(n)
 			remaining -= int64(n)
-			elapsed := time.Since(start).Seconds()
-			if elapsed >= 0.001 {
-				speed := float64(downloaded) / elapsed
-				fmt.Printf("\r  speed: %s/s  |  downloaded: %s  |  left: %s  ",
-					formatBytes(speed), formatBytes(float64(downloaded)), formatBytes(float64(remaining)))
-			}
+			ui.Progress("download", downloaded, int64(size))
 		}
 		if readErr != nil {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
 				break
 			}
+			ui.Fail()
 			return readErr
 		}
 	}
-	fmt.Println()
+	ui.FinishProgress(int64(size))
 	if downloaded != int64(size) {
+		ui.Fail()
 		return fmt.Errorf("incomplete download: got %d of %d bytes", downloaded, size)
 	}
-	fmt.Printf("Downloaded: %s\n", savePath)
+	ui.DoneSaved(savePath)
 	return nil
 }
 

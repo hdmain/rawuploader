@@ -1,0 +1,14 @@
+Package: tcpraw
+Version: 1.4.0
+Architecture: amd64
+Maintainer: hdmain <noreply@github.com>
+Filename: ./tcpraw_1.4.0_amd64.deb
+Size: 2612848
+MD5sum: c1a8305b322a2c148b1c0e117bed9a0e
+SHA1: 03d29ad52b67d51d8304ef245cd6dedd99a3263e
+SHA256: a0b1c89f7a67760d50a101c3d16fa7e59d9a54e3b2bb39c4eda3102dd50ffe73
+Section: net
+Priority: optional
+Description: TCP file send/receive with encrypted 6-digit codes
+ tcpraw sends and receives files over TCP using client-side encryption.
+

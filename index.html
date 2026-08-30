@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tcpraw APT repository</title>
+</head>
+<body>
+  <h1>tcpraw APT repository</h1>
+  <pre><code>echo "deb [trusted=yes] https://hdmain.github.io/rawuploader ./" \
+  | sudo tee /etc/apt/sources.list.d/tcpraw.list
+sudo apt update
+sudo apt install tcpraw</code></pre>
+</body>
+</html>

@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"archive/tar"
@@ -13,7 +13,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -351,44 +350,47 @@ type probeResult struct {
 	ok       bool
 }
 
-func probeServer(addr string, serverID int, fileSize uint64) (speedBps float64, ok bool) {
+func probeServer(addr string, serverID int, fileSize uint64) (speedBps float64, rtt time.Duration, ok bool) {
+	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, probeDialTimeout)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	defer conn.Close()
+	rtt = time.Since(start)
+	setTCPOptions(conn)
 	conn.SetDeadline(time.Now().Add(probeTimeout))
 
 	if err := WriteMessageType(conn, MsgTest); err != nil {
-		return 0, false
+		return 0, rtt, false
 	}
 	if err := WriteTestRequest(conn, fileSize); err != nil {
-		return 0, false
+		return 0, rtt, false
 	}
 
 	var free uint64
 	if err := binary.Read(conn, binary.BigEndian, &free); err != nil {
-		return 0, false
+		return 0, rtt, false
 	}
 	if free < fileSize {
-		return 0, false
+		return 0, rtt, false
 	}
 
 	var payloadLen uint32
 	if err := binary.Read(conn, binary.BigEndian, &payloadLen); err != nil {
-		return 0, false
+		return 0, rtt, false
 	}
 	if payloadLen == 0 || payloadLen > 4*1024*1024 {
-		return 0, false
+		return 0, rtt, false
 	}
 
 	if _, err := io.CopyN(io.Discard, conn, int64(payloadLen)); err != nil {
-		return 0, false
+		return 0, rtt, false
 	}
 	// Rank by upload speed — send() is limited by client→server throughput, not download.
 	upBuf := make([]byte, 64*1024)
 	var wrote int64
-	start := time.Now()
+	upStart := time.Now()
 	for wrote < int64(payloadLen) {
 		n := len(upBuf)
 		if int64(payloadLen)-wrote < int64(n) {
@@ -396,21 +398,21 @@ func probeServer(addr string, serverID int, fileSize uint64) (speedBps float64, 
 		}
 		nn, err := conn.Write(upBuf[:n])
 		if err != nil {
-			return 0, false
+			return 0, rtt, false
 		}
 		wrote += int64(nn)
 	}
-	elapsed := time.Since(start).Seconds()
+	elapsed := time.Since(upStart).Seconds()
 	if elapsed < 0.0001 {
 		elapsed = 0.0001
 	}
-	return float64(payloadLen) / elapsed, true
+	return float64(payloadLen) / elapsed, rtt, true
 }
 
-func tryServersFromList(fileSize int64) (net.Conn, int, error) {
+func tryServersFromList(fileSize int64) (net.Conn, int, string, error) {
 	addrs, err := fetchServerList()
 	if err != nil {
-		return nil, 0, fmt.Errorf("fetch server list: %w", err)
+		return nil, 0, "", fmt.Errorf("fetch server list: %w", err)
 	}
 
 	var fileSizeU uint64
@@ -427,31 +429,61 @@ func tryServersFromList(fileSize int64) (net.Conn, int, error) {
 		if addr == "" {
 			continue
 		}
-		list = append(list, cand{id, addr})
+		for _, d := range expandDialAddrs(addr) {
+			list = append(list, cand{id, d})
+		}
 	}
-	rand.Shuffle(len(list), func(i, j int) { list[i], list[j] = list[j], list[i] })
+	if len(list) == 0 {
+		return nil, 0, "", fmt.Errorf("no server available (none had enough space or all probes failed)")
+	}
 
-	var best probeResult
-	for _, c := range list {
-		speed, ok := probeServer(c.addr, c.id, fileSizeU)
-		if !ok {
+	type ranked struct {
+		id       int
+		addr     string
+		speedBps float64
+		rtt      time.Duration
+		bgp      bgpInfo
+		score    float64
+		ok       bool
+	}
+	results := make([]ranked, len(list))
+	var wg sync.WaitGroup
+	for i, c := range list {
+		wg.Add(1)
+		go func(i int, c cand) {
+			defer wg.Done()
+			speed, rtt, ok := probeServer(c.addr, c.id, fileSizeU)
+			if !ok {
+				return
+			}
+			bgp := lookupBGP(hostOfAddr(c.addr))
+			results[i] = ranked{
+				id: c.id, addr: c.addr, speedBps: speed, rtt: rtt, bgp: bgp, ok: true,
+				score: routeScore(speed, rtt, bgp.Hops),
+			}
+		}(i, c)
+	}
+	wg.Wait()
+
+	var best ranked
+	for _, r := range results {
+		if !r.ok {
 			continue
 		}
-		if !best.ok || speed > best.speedBps {
-			best = probeResult{c.id, c.addr, speed, true}
+		if !best.ok || r.score > best.score {
+			best = r
 		}
 	}
 
 	if !best.ok {
-		return nil, 0, fmt.Errorf("no server available (none had enough space or all probes failed)")
+		return nil, 0, "", fmt.Errorf("no server available (none had enough space or all probes failed)")
 	}
 
-	conn, err := net.DialTimeout("tcp", best.addr, dialTimeout)
+	conn, err := dialTuned(best.addr)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
-	setTCPBuffers(conn)
-	return conn, best.serverID, nil
+	return conn, best.id, formatRoute(best.id, best.addr, best.speedBps, best.bgp), nil
 }
 
 const benchDurationSec uint16 = 2
@@ -646,20 +678,29 @@ func runClientServers() error {
 	const gb = 1024 * 1024 * 1024
 	const mb = 1024 * 1024
 	fmt.Println()
-	fmt.Printf("%-4s %-24s %10s %12s %14s %14s\n", "ID", "Address", "Ping", "Free", "Download", "Upload")
-	fmt.Printf("%-4s %-24s %10s %12s %14s %14s\n", "--", "-------", "----", "----", "--------", "------")
+	fmt.Printf("%-4s %-24s %10s %12s %14s %14s %10s %6s\n", "ID", "Address", "Ping", "Free", "Download", "Upload", "ASN", "Hops")
+	fmt.Printf("%-4s %-24s %10s %12s %14s %14s %10s %6s\n", "--", "-------", "----", "----", "--------", "------", "---", "----")
 	for _, s := range results {
 		pingStr := "N/A"
 		freeStr := "N/A"
 		downStr := "N/A"
 		upStr := "N/A"
+		asnStr := "N/A"
+		hopsStr := "N/A"
 		if s.ok {
 			pingStr = fmt.Sprintf("%.0f ms", s.pingMs)
 			freeStr = fmt.Sprintf("%.2f GB", float64(s.free)/float64(gb))
 			downStr = fmt.Sprintf("%.2f MB/s", s.downloadBps/float64(mb))
 			upStr = fmt.Sprintf("%.2f MB/s", s.uploadBps/float64(mb))
+			bgp := lookupBGP(hostOfAddr(s.addr))
+			if bgp.ASN != "" {
+				asnStr = bgp.ASN
+			}
+			if bgp.Hops > 0 {
+				hopsStr = fmt.Sprintf("%d", bgp.Hops)
+			}
 		}
-		fmt.Printf("%-4d %-24s %10s %12s %14s %14s\n", s.id, s.addr, pingStr, freeStr, downStr, upStr)
+		fmt.Printf("%-4d %-24s %10s %12s %14s %14s %10s %6s\n", s.id, s.addr, pingStr, freeStr, downStr, upStr, asnStr, hopsStr)
 	}
 	return nil
 }
@@ -702,19 +743,15 @@ func getTotalNetworkStorage(timeout time.Duration) uint64 {
 }
 
 func dialWithFallback(addr string) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
-	if err == nil {
-		setTCPBuffers(conn)
-		return conn, nil
+	conn, err := dialBestPath(addr)
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", addr, err)
 	}
-	return nil, fmt.Errorf("connect to %s: %w", addr, err)
+	return conn, nil
 }
 
 func setTCPBuffers(conn net.Conn) {
-	if tc, ok := conn.(*net.TCPConn); ok {
-		tc.SetReadBuffer(tcpBufferSize)
-		tc.SetWriteBuffer(tcpBufferSize)
-	}
+	setTCPOptions(conn)
 }
 
 func fetchAddressFromURL(url string) (string, error) {
@@ -746,7 +783,7 @@ func generateCodeWithServerID(serverID int) string {
 	return fmt.Sprintf("%d%05d", serverID, rand.Intn(100000))
 }
 
-func runClientSend(filePath string, addr string, serverIDHint int, storageDurationSec uint32, ipfsMirror bool) error {
+func runClientSend(filePath string, addr string, serverIDHint int, storageDurationSec uint32) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
@@ -790,120 +827,121 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 	}
 	ui.FinishProgress(size)
 	plaintextChecksum := hasher.Sum(nil)
-	var conn net.Conn
-	var serverID int
-	var serverAddr string
-	if addr != "" {
-		ui.Status("connect " + addr)
-		var err error
-		conn, err = dialWithFallback(addr)
-		if err != nil {
-			ui.Fail()
-			return err
-		}
-		serverAddr = addr
-		serverID = 0
-	} else if serverIDHint >= 0 && serverIDHint <= 9 {
-		addrs, fetchErr := fetchServerList()
-		if fetchErr != nil {
-			ui.Fail()
-			return fmt.Errorf("fetch server list: %w", fetchErr)
-		}
-		if addrs[serverIDHint] == "" {
-			ui.Fail()
-			return fmt.Errorf("server %d not in list", serverIDHint)
-		}
-		var err error
-		serverAddr = addrs[serverIDHint]
-		ui.Status(fmt.Sprintf("connect #%d", serverIDHint))
-		conn, err = net.DialTimeout("tcp", serverAddr, dialTimeout)
-		if err != nil {
-			ui.Fail()
-			return err
-		}
-		setTCPBuffers(conn)
-		serverID = serverIDHint
-	} else {
-		ui.Status("probing")
-		var err error
-		conn, serverID, err = tryServersFromList(size)
-		if err != nil {
-			ui.Fail()
-			return err
-		}
-		addrs, fetchErr := fetchServerList()
-		if fetchErr != nil {
-			ui.Fail()
-			return fmt.Errorf("fetch server list: %w", fetchErr)
-		}
-		serverAddr = addrs[serverID]
-		ui.Status(fmt.Sprintf("server #%d", serverID))
-	}
-	defer conn.Close()
-	code := generateCodeWithServerID(serverID)
 	numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
 
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		ui.Fail()
-		return fmt.Errorf("seek file: %w", err)
-	}
+	var lastErr error
+	for attempt := 0; attempt <= maxRetrains; attempt++ {
+		if attempt > 0 {
+			ui.Status(fmt.Sprintf("retrain %d", attempt))
+		}
+		conn, serverID, err := connectSendTarget(addr, serverIDHint, size, ui)
+		if err != nil {
+			ui.Fail()
+			return err
+		}
+		code := generateCodeWithServerID(serverID)
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			closeRetrain(conn)
+			ui.Fail()
+			return fmt.Errorf("seek file: %w", err)
+		}
 
-	bw := bufio.NewWriterSize(conn, bufSize)
-	if err := WriteMessageType(bw, MsgUpload); err != nil {
-		ui.Fail()
-		return err
-	}
-	ui.beginTransfer()
-	progress := func(sent, total int64) {
-		ui.Progress("upload", sent, total)
-	}
-	getChunk := func() ([]byte, error) {
-		n, err := f.Read(chunkBuf)
-		if n > 0 {
-			return chunkBuf[:n], nil
+		wc, watch := wrapWatched(conn, size)
+		bw := bufio.NewWriterSize(wc, bufSize)
+		if err := WriteMessageType(bw, MsgUpload); err != nil {
+			closeRetrain(conn)
+			ui.Fail()
+			return err
+		}
+		watch.reset()
+		ui.beginTransfer()
+		progress := func(sent, total int64) {
+			ui.Progress("upload", sent, total)
+		}
+		getChunk := func() ([]byte, error) {
+			n, err := f.Read(chunkBuf)
+			if n > 0 {
+				return chunkBuf[:n], nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			return nil, io.EOF
+		}
+		err = WriteEncryptedUploadChunked(bw, code, baseName, size, storageDurationSec, numChunks, plaintextChecksum, getChunk, progress)
+		if err == nil {
+			err = bw.Flush()
+		}
+		if isRetrainable(err) {
+			closeRetrain(conn)
+			lastErr = err
+			continue
 		}
 		if err != nil {
-			return nil, err
+			closeRetrain(conn)
+			ui.Fail()
+			return fmt.Errorf("send: %w", err)
 		}
-		return nil, io.EOF
-	}
-	if err := WriteEncryptedUploadChunked(bw, code, baseName, size, storageDurationSec, numChunks, plaintextChecksum, getChunk, progress); err != nil {
-		ui.Fail()
-		return fmt.Errorf("send: %w", err)
-	}
-	ui.FinishProgress(size)
-	if err := bw.Flush(); err != nil {
-		ui.Fail()
-		return fmt.Errorf("flush: %w", err)
-	}
+		ui.FinishProgress(size)
 
-	ui.Status("confirm")
-	status, err := ReadStatus(conn)
+		ui.Status("confirm")
+		status, err := ReadStatus(wc)
+		if isRetrainable(err) {
+			closeRetrain(conn)
+			lastErr = err
+			continue
+		}
+		if err != nil {
+			closeRetrain(conn)
+			ui.Fail()
+			return fmt.Errorf("read response: %w", err)
+		}
+		conn.Close()
+
+		switch status {
+		case StatusOK:
+			ui.Done(code, storageDurationSec)
+			return nil
+		case StatusError:
+			ui.Fail()
+			return fmt.Errorf("server error")
+		default:
+			ui.Fail()
+			return fmt.Errorf("unknown status: %d", status)
+		}
+	}
+	ui.Fail()
+	if lastErr == nil {
+		lastErr = errStall
+	}
+	return fmt.Errorf("send: %w", lastErr)
+}
+
+func connectSendTarget(addr string, serverIDHint int, fileSize int64, ui *sendUI) (net.Conn, int, error) {
+	if addr != "" {
+		ui.Status("connect " + addr)
+		conn, err := dialWithFallback(addr)
+		return conn, 0, err
+	}
+	if serverIDHint >= 0 && serverIDHint <= 9 {
+		addrs, fetchErr := fetchServerList()
+		if fetchErr != nil {
+			return nil, 0, fmt.Errorf("fetch server list: %w", fetchErr)
+		}
+		if addrs[serverIDHint] == "" {
+			return nil, 0, fmt.Errorf("server %d not in list", serverIDHint)
+		}
+		ui.Status(fmt.Sprintf("connect #%d", serverIDHint))
+		conn, err := dialWithFallback(addrs[serverIDHint])
+		return conn, serverIDHint, err
+	}
+	ui.Status("probing")
+	conn, serverID, summary, err := tryServersFromList(fileSize)
 	if err != nil {
-		ui.Fail()
-		return fmt.Errorf("read response: %w", err)
+		return nil, 0, err
 	}
-
-	switch status {
-	case StatusOK:
-		ipfsNote := ""
-		if ipfsMirror {
-			if err := requestIPFSMirror(serverAddr, code); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: IPFS mirror request failed: %v\n", err)
-				ipfsNote = "failed · " + progName() + " status " + code
-			} else {
-				ipfsNote = "queued · " + progName() + " status " + code
-			}
-		}
-		ui.Done(code, storageDurationSec, ipfsNote)
-		return nil
-	case StatusError:
-		ui.Fail()
-		return fmt.Errorf("server error")
-	default:
-		ui.Fail()
-		return fmt.Errorf("unknown status: %d", status)
-	}
+	ui.Status(summary)
+	return conn, serverID, nil
 }
 
 func runClientSecureSend(filePath string, addr string, serverIDHint int, storageDurationSec uint32) error {
@@ -937,155 +975,188 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 		return fmt.Errorf("generate key: %w", err)
 	}
 
-	var conn net.Conn
-	if addr != "" {
-		ui.Status("connect " + addr)
-		conn, err = dialWithFallback(addr)
-	} else if serverIDHint >= 0 && serverIDHint <= 9 {
-		addrs, fetchErr := fetchServerList()
-		if fetchErr != nil {
-			ui.Fail()
-			return fmt.Errorf("fetch server list: %w", fetchErr)
-		}
-		if addrs[serverIDHint] == "" {
-			ui.Fail()
-			return fmt.Errorf("server %d not in list", serverIDHint)
-		}
-		ui.Status(fmt.Sprintf("connect #%d", serverIDHint))
-		conn, err = net.DialTimeout("tcp", addrs[serverIDHint], dialTimeout)
-		if err != nil {
-			ui.Fail()
-			return err
-		}
-		setTCPBuffers(conn)
-	} else {
-		ui.Status("probing")
-		conn, _, err = tryServersFromList(size)
-	}
-	if err != nil {
-		ui.Fail()
-		return err
-	}
-	defer conn.Close()
-
-	bw := bufio.NewWriterSize(conn, bufSize)
-	if err = WriteMessageType(bw, MsgSecureUpload); err != nil {
-		ui.Fail()
-		return err
-	}
-
-	if size <= maxSecureLoadRAM {
-		ui.Status("encrypt")
-		plaintext, err := io.ReadAll(f)
-		if err != nil {
-			ui.Fail()
-			return fmt.Errorf("read file: %w", err)
-		}
-		plaintextChecksum := sha256.Sum256(plaintext)
-		nonce, sealed, err := encryptWithKey(key, plaintext)
-		if err != nil {
-			ui.Fail()
-			return fmt.Errorf("encrypt: %w", err)
-		}
-		ui.beginTransfer()
-		progress := func(sent, total int64) {
-			ui.Progress("upload", sent, total)
-		}
-		if _, err := bw.Write([]byte{0}); err != nil {
-			ui.Fail()
-			return err
-		}
-		if err := binary.Write(bw, binary.BigEndian, storageDurationSec); err != nil {
-			ui.Fail()
-			return fmt.Errorf("write storage duration: %w", err)
-		}
-		if err := WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed, progress); err != nil {
-			ui.Fail()
-			return fmt.Errorf("send: %w", err)
-		}
-		ui.FinishProgress(int64(len(sealed)))
-	} else {
-		ui.Status("checksum")
-		if _, err := bw.Write([]byte{1}); err != nil {
-			ui.Fail()
-			return err
-		}
-		hasher := sha256.New()
-		chunkBuf := make([]byte, FileChunkSize)
-		ui.beginTransfer()
-		var totalRead int64
-		for totalRead < size {
-			n, err := f.Read(chunkBuf)
-			if n > 0 {
-				hasher.Write(chunkBuf[:n])
-				totalRead += int64(n)
-				ui.Progress("checksum", totalRead, size)
+	var lastErr error
+	for attempt := 0; attempt <= maxRetrains; attempt++ {
+		if attempt > 0 {
+			ui.Status(fmt.Sprintf("retrain %d", attempt))
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				ui.Fail()
+				return fmt.Errorf("seek file: %w", err)
 			}
-			if err == io.EOF {
-				break
-			}
+		}
+		conn, _, err := connectSendTarget(addr, serverIDHint, size, ui)
+		if err != nil {
+			ui.Fail()
+			return err
+		}
+		wc, watch := wrapWatched(conn, size)
+		bw := bufio.NewWriterSize(wc, bufSize)
+		if err = WriteMessageType(bw, MsgSecureUpload); err != nil {
+			closeRetrain(conn)
+			ui.Fail()
+			return err
+		}
+		watch.reset()
+
+		if size <= maxSecureLoadRAM {
+			ui.Status("encrypt")
+			plaintext, err := io.ReadAll(f)
 			if err != nil {
+				closeRetrain(conn)
 				ui.Fail()
 				return fmt.Errorf("read file: %w", err)
 			}
-		}
-		ui.FinishProgress(size)
-		plaintextChecksum := hasher.Sum(nil)
-		numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
-		if err := WriteSecureUploadChunkedHeader(bw, baseName, size, storageDurationSec, numChunks, plaintextChecksum); err != nil {
-			ui.Fail()
-			return fmt.Errorf("send header: %w", err)
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			ui.Fail()
-			return fmt.Errorf("seek file: %w", err)
-		}
-		ui.beginTransfer()
-		var sent int64
-		for sent < size {
-			n, err := f.Read(chunkBuf)
-			if n > 0 {
-				nonce, sealed, encErr := encryptWithKey(key, chunkBuf[:n])
-				if encErr != nil {
-					ui.Fail()
-					return fmt.Errorf("encrypt chunk: %w", encErr)
-				}
-				if err := WriteChunk(bw, nonce, sealed); err != nil {
-					ui.Fail()
-					return fmt.Errorf("write chunk: %w", err)
-				}
-				sent += int64(n)
-				ui.Progress("upload", sent, size)
+			plaintextChecksum := sha256.Sum256(plaintext)
+			nonce, sealed, err := encryptWithKey(key, plaintext)
+			if err != nil {
+				closeRetrain(conn)
+				ui.Fail()
+				return fmt.Errorf("encrypt: %w", err)
 			}
-			if err == io.EOF {
-				break
+			ui.beginTransfer()
+			progress := func(sent, total int64) {
+				ui.Progress("upload", sent, total)
+			}
+			if _, err := bw.Write([]byte{0}); err != nil {
+				closeRetrain(conn)
+				if isRetrainable(err) {
+					lastErr = err
+					continue
+				}
+				ui.Fail()
+				return err
+			}
+			if err := binary.Write(bw, binary.BigEndian, storageDurationSec); err != nil {
+				closeRetrain(conn)
+				ui.Fail()
+				return fmt.Errorf("write storage duration: %w", err)
+			}
+			err = WriteEncryptedBlob(bw, baseName, plaintextChecksum[:], nonce, sealed, progress)
+			if err == nil {
+				err = bw.Flush()
+			}
+			if isRetrainable(err) {
+				closeRetrain(conn)
+				lastErr = err
+				continue
 			}
 			if err != nil {
+				closeRetrain(conn)
 				ui.Fail()
-				return fmt.Errorf("read file: %w", err)
+				return fmt.Errorf("send: %w", err)
 			}
+			ui.FinishProgress(int64(len(sealed)))
+		} else {
+			ui.Status("checksum")
+			if _, err := bw.Write([]byte{1}); err != nil {
+				closeRetrain(conn)
+				if isRetrainable(err) {
+					lastErr = err
+					continue
+				}
+				ui.Fail()
+				return err
+			}
+			hasher := sha256.New()
+			chunkBuf := make([]byte, FileChunkSize)
+			ui.beginTransfer()
+			var totalRead int64
+			for totalRead < size {
+				n, err := f.Read(chunkBuf)
+				if n > 0 {
+					hasher.Write(chunkBuf[:n])
+					totalRead += int64(n)
+					ui.Progress("checksum", totalRead, size)
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					closeRetrain(conn)
+					ui.Fail()
+					return fmt.Errorf("read file: %w", err)
+				}
+			}
+			ui.FinishProgress(size)
+			plaintextChecksum := hasher.Sum(nil)
+			numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
+			if err := WriteSecureUploadChunkedHeader(bw, baseName, size, storageDurationSec, numChunks, plaintextChecksum); err != nil {
+				closeRetrain(conn)
+				ui.Fail()
+				return fmt.Errorf("send header: %w", err)
+			}
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				closeRetrain(conn)
+				ui.Fail()
+				return fmt.Errorf("seek file: %w", err)
+			}
+			watch.reset()
+			ui.beginTransfer()
+			var sent int64
+			var xerr error
+			for sent < size {
+				n, err := f.Read(chunkBuf)
+				if n > 0 {
+					nonce, sealed, encErr := encryptWithKey(key, chunkBuf[:n])
+					if encErr != nil {
+						xerr = fmt.Errorf("encrypt chunk: %w", encErr)
+						break
+					}
+					if err := WriteChunk(bw, nonce, sealed); err != nil {
+						xerr = err
+						break
+					}
+					sent += int64(n)
+					ui.Progress("upload", sent, size)
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					xerr = fmt.Errorf("read file: %w", err)
+					break
+				}
+			}
+			if xerr == nil {
+				xerr = bw.Flush()
+			}
+			if isRetrainable(xerr) {
+				closeRetrain(conn)
+				lastErr = xerr
+				continue
+			}
+			if xerr != nil {
+				closeRetrain(conn)
+				ui.Fail()
+				return xerr
+			}
+			ui.FinishProgress(size)
 		}
-		ui.FinishProgress(size)
-	}
 
-	if err := bw.Flush(); err != nil {
-		ui.Fail()
-		return fmt.Errorf("flush: %w", err)
+		ui.Status("confirm")
+		status, code, err := ReadCodeResponse(wc)
+		if isRetrainable(err) {
+			closeRetrain(conn)
+			lastErr = err
+			continue
+		}
+		conn.Close()
+		if err != nil {
+			ui.Fail()
+			return fmt.Errorf("read response: %w", err)
+		}
+		if status != StatusOK {
+			ui.Fail()
+			return fmt.Errorf("server error")
+		}
+		ui.DoneSecure(code, hex.EncodeToString(key), storageDurationSec)
+		return nil
 	}
-
-	ui.Status("confirm")
-	status, code, err := ReadCodeResponse(conn)
-	if err != nil {
-		ui.Fail()
-		return fmt.Errorf("read response: %w", err)
+	ui.Fail()
+	if lastErr == nil {
+		lastErr = errStall
 	}
-	if status != StatusOK {
-		ui.Fail()
-		return fmt.Errorf("server error")
-	}
-
-	ui.DoneSecure(code, hex.EncodeToString(key), storageDurationSec)
-	return nil
+	return fmt.Errorf("send: %w", lastErr)
 }
 
 func runClientGet(code, outputPath string, unzip bool) error {
@@ -1104,334 +1175,344 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		return fmt.Errorf("server %d not in list", serverID)
 	}
 	addr := addrs[serverID]
-	conn, err := dialWithFallback(addr)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
 
-	bw := bufio.NewWriterSize(conn, bufSize)
-	if err := WriteMessageType(bw, MsgDownload); err != nil {
-		return err
-	}
-	if err := WriteDownloadRequest(bw, code); err != nil {
-		return err
-	}
-	if err := bw.Flush(); err != nil {
-		return err
-	}
-
-	fmt.Println("info: waiting for server response...")
-	br := bufio.NewReaderSize(conn, bufSize)
-	status, err := ReadStatus(br)
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-
-	if status == StatusNotFound {
-		return fmt.Errorf("code unknown or expired (data kept 1 hour)")
-	}
-	if status != StatusOK {
-		return fmt.Errorf("server error (status %d)", status)
-	}
-
-	formatByte := make([]byte, 1)
-	if _, err := io.ReadFull(br, formatByte); err != nil {
-		return fmt.Errorf("read format: %w", err)
-	}
-
-	start := time.Now()
-	progress := func(downloaded, total int64) {
-		elapsed := time.Since(start).Seconds()
-		if elapsed < 0.001 {
-			return
+	var (
+		skipChunks uint32
+		out        *os.File
+		hasher     = sha256.New()
+		downloaded int64
+		ui         *sendUI
+		savePath   string
+		secureKey  []byte
+		format     byte
+		headerOK   bool
+		numChunks  uint32
+		totalPlain int64
+		plainSum   []byte
+		lastErr    error
+	)
+	defer func() {
+		if out != nil {
+			out.Close()
 		}
-		speed := float64(downloaded) / elapsed
-		remaining := total - downloaded
-		fmt.Printf("\r  speed: %s/s  |  downloaded: %s  |  left: %s  ", formatBytes(speed), formatBytes(float64(downloaded)), formatBytes(float64(remaining)))
-	}
+	}()
 
-	if formatByte[0] == 0 {
-		name, plaintextChecksum, nonce, sealedLen, err := ReadEncryptedBlobHeader(br)
+	waitUI := newRecvUI(code, 0)
+	waitUI.Status("waiting")
+
+	for attempt := 0; attempt <= maxRetrains; attempt++ {
+		if attempt > 0 {
+			waitUI.Status(fmt.Sprintf("retrain %d", attempt))
+			if ui != nil {
+				ui.Status(fmt.Sprintf("retrain %d", attempt))
+			}
+		}
+		conn, br, fmtByte, serverSkipped, err := openDownload(addr, code, skipChunks)
 		if err != nil {
-			return fmt.Errorf("read encrypted blob header: %w", err)
-		}
-		savePath := resolveDownloadPath(outputPath, name)
-		if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
+			waitUI.Fail()
 			return err
 		}
-		sealed, err := ReadEncryptedBlobBody(br, sealedLen, progress)
-		if err != nil {
-			return fmt.Errorf("read encrypted blob: %w", err)
-		}
-		fmt.Println()
-		fmt.Println("info: decrypting with your code...")
-		plaintext, err := decryptWithCode(code, nonce, sealed)
-		if err != nil {
-			return fmt.Errorf("decrypt: %w", err)
-		}
-		actualChecksum := sha256.Sum256(plaintext)
-		if !checksumEqual(actualChecksum[:], plaintextChecksum) {
-			return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
-		}
-		if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
-			return fmt.Errorf("write file %s: %w", savePath, err)
-		}
-		fmt.Printf("Downloaded: %s\n", savePath)
-		if unzip {
-			if err := extractTarGz(savePath); err != nil {
-				return fmt.Errorf("unzip: %w", err)
-			}
-			fmt.Println("Extracted archive.")
-		}
-		return nil
-	}
 
-	if formatByte[0] == 2 {
-		name, plaintextChecksum, nonce, sealedLen, err := ReadEncryptedBlobHeader(br)
-		if err != nil {
-			return fmt.Errorf("read encrypted blob header: %w", err)
+		if !headerOK {
+			format = fmtByte
 		}
-		savePath := resolveDownloadPath(outputPath, name)
-		if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
-			return err
-		}
-		sealed, err := ReadEncryptedBlobBody(br, sealedLen, progress)
-		if err != nil {
-			return fmt.Errorf("read encrypted blob: %w", err)
-		}
-		fmt.Println()
-		fmt.Print("Enter key (64 hex characters): ")
-		var keyHex string
-		if _, err := fmt.Scanln(&keyHex); err != nil {
-			return fmt.Errorf("read key: %w", err)
-		}
-		keyHex = strings.TrimSpace(keyHex)
-		if len(keyHex) != 64 {
-			return fmt.Errorf("key must be 64 hex characters (32 bytes)")
-		}
-		key, err := hex.DecodeString(keyHex)
-		if err != nil {
-			return fmt.Errorf("invalid hex key: %w", err)
-		}
-		plaintext, err := decryptWithKey(key, nonce, sealed)
-		if err != nil {
-			return fmt.Errorf("decrypt: %w", err)
-		}
-		sum := sha256.Sum256(plaintext)
-		if !checksumEqual(sum[:], plaintextChecksum) {
-			return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
-		}
-		if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
-			return fmt.Errorf("write file %s: %w", savePath, err)
-		}
-		fmt.Printf("Downloaded: %s\n", savePath)
-		if unzip {
-			if err := extractTarGz(savePath); err != nil {
-				return fmt.Errorf("unzip: %w", err)
-			}
-			fmt.Println("Extracted archive.")
-		}
-		return nil
-	}
 
-	if formatByte[0] == 3 {
-		name, totalPlainLen, numChunks, plaintextChecksum, err := ReadEncryptedBlobChunkedHeader(br)
+		if format == 0 || format == 2 {
+			name, plaintextChecksum, nonce, sealedLen, err := ReadEncryptedBlobHeader(br)
+			if err != nil {
+				closeRetrain(conn)
+				if isRetrainable(err) {
+					lastErr = err
+					continue
+				}
+				waitUI.Fail()
+				return fmt.Errorf("read encrypted blob header: %w", err)
+			}
+			savePath = resolveDownloadPath(outputPath, name)
+			if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
+				closeRetrain(conn)
+				waitUI.Fail()
+				return err
+			}
+			recv := newRecvUI(name, int64(sealedLen))
+			recv.beginTransfer()
+			sealed, err := ReadEncryptedBlobBody(br, sealedLen, func(done, total int64) { recv.Progress("download", done, total) })
+			closeRetrain(conn)
+			if isRetrainable(err) {
+				lastErr = err
+				continue
+			}
+			if err != nil {
+				recv.Fail()
+				return fmt.Errorf("read encrypted blob: %w", err)
+			}
+			recv.FinishProgress(int64(sealedLen))
+			if format == 2 {
+				recv.endLive()
+				key, err := promptSecureKey()
+				if err != nil {
+					return err
+				}
+				plaintext, err := decryptWithKey(key, nonce, sealed)
+				if err != nil {
+					return fmt.Errorf("decrypt: %w", err)
+				}
+				sum := sha256.Sum256(plaintext)
+				if !checksumEqual(sum[:], plaintextChecksum) {
+					return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
+				}
+				if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
+					return fmt.Errorf("write file %s: %w", savePath, err)
+				}
+				return finishGet(recv, savePath, unzip)
+			}
+			recv.Status("decrypt")
+			plaintext, err := decryptWithCode(code, nonce, sealed)
+			if err != nil {
+				recv.Fail()
+				return fmt.Errorf("decrypt: %w", err)
+			}
+			actualChecksum := sha256.Sum256(plaintext)
+			if !checksumEqual(actualChecksum[:], plaintextChecksum) {
+				recv.Fail()
+				return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
+			}
+			if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
+				recv.Fail()
+				return fmt.Errorf("write file %s: %w", savePath, err)
+			}
+			return finishGet(recv, savePath, unzip)
+		}
+
+		// chunked formats 1 and 3
+		name, totalPlainLen, nChunks, plaintextChecksum, err := ReadEncryptedBlobChunkedHeader(br)
 		if err != nil {
+			closeRetrain(conn)
+			if isRetrainable(err) {
+				lastErr = err
+				continue
+			}
+			waitUI.Fail()
 			return fmt.Errorf("read blob header: %w", err)
 		}
-		savePath := resolveDownloadPath(outputPath, name)
-		if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
-			return err
-		}
-		fmt.Println()
-		fmt.Print("Enter key (64 hex characters): ")
-		var keyHex string
-		if _, err := fmt.Scanln(&keyHex); err != nil {
-			return fmt.Errorf("read key: %w", err)
-		}
-		keyHex = strings.TrimSpace(keyHex)
-		if len(keyHex) != 64 {
-			return fmt.Errorf("key must be 64 hex characters (32 bytes)")
-		}
-		key, err := hex.DecodeString(keyHex)
-		if err != nil {
-			return fmt.Errorf("invalid hex key: %w", err)
-		}
-		out, err := os.Create(savePath)
-		if err != nil {
-			return fmt.Errorf("create file %s: %w", savePath, err)
-		}
-		defer out.Close()
-		hasher := sha256.New()
-		var downloaded int64
-		for i := uint32(0); i < numChunks; i++ {
-			nonce, sealed, err := ReadChunkRaw(br)
-			if err != nil {
-				return fmt.Errorf("read chunk: %w", err)
+		if !headerOK {
+			savePath = resolveDownloadPath(outputPath, name)
+			if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
+				closeRetrain(conn)
+				waitUI.Fail()
+				return err
 			}
-			pt, err := decryptWithKey(key, nonce, sealed)
+			if format == 3 {
+				waitUI.endLive()
+				secureKey, err = promptSecureKey()
+				if err != nil {
+					closeRetrain(conn)
+					return err
+				}
+			}
+			out, err = os.Create(savePath)
 			if err != nil {
-				return fmt.Errorf("decrypt chunk: %w", err)
+				closeRetrain(conn)
+				return fmt.Errorf("create file %s: %w", savePath, err)
+			}
+			ui = newRecvUI(name, int64(totalPlainLen))
+			ui.beginTransfer()
+			numChunks = nChunks
+			totalPlain = int64(totalPlainLen)
+			plainSum = plaintextChecksum
+			headerOK = true
+		}
+
+		if skipChunks > 0 && !serverSkipped {
+			if err := discardDownloadChunks(br, skipChunks, code, format == 3, secureKey); err != nil {
+				closeRetrain(conn)
+				if isRetrainable(err) {
+					lastErr = err
+					continue
+				}
+				ui.Fail()
+				return fmt.Errorf("skip chunks: %w", err)
+			}
+		}
+
+		stall := false
+		for i := skipChunks; i < numChunks; i++ {
+			var pt []byte
+			if format == 3 {
+				nonce, sealed, err := ReadChunkRaw(br)
+				if err != nil {
+					if isRetrainable(err) {
+						stall = true
+						break
+					}
+					closeRetrain(conn)
+					ui.Fail()
+					return fmt.Errorf("read chunk: %w", err)
+				}
+				pt, err = decryptWithKey(secureKey, nonce, sealed)
+				if err != nil {
+					closeRetrain(conn)
+					ui.Fail()
+					return fmt.Errorf("decrypt chunk: %w", err)
+				}
+			} else {
+				pt, err = ReadEncryptedBlobNextChunk(br, code)
+				if err != nil {
+					if isRetrainable(err) {
+						stall = true
+						break
+					}
+					closeRetrain(conn)
+					ui.Fail()
+					return fmt.Errorf("read chunk: %w", err)
+				}
 			}
 			if _, err := out.Write(pt); err != nil {
+				closeRetrain(conn)
+				ui.Fail()
 				return fmt.Errorf("write chunk: %w", err)
 			}
 			hasher.Write(pt)
 			downloaded += int64(len(pt))
-			progress(downloaded, int64(totalPlainLen))
+			skipChunks = i + 1
+			ui.Progress("download", downloaded, totalPlain)
 		}
-		fmt.Println()
-		if !checksumEqual(hasher.Sum(nil), plaintextChecksum) {
-			return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
+		closeRetrain(conn)
+		if stall {
+			lastErr = errStall
+			continue
 		}
-		fmt.Printf("Downloaded: %s\n", savePath)
-		if unzip {
-			if err := extractTarGz(savePath); err != nil {
-				return fmt.Errorf("unzip: %w", err)
+		ui.FinishProgress(totalPlain)
+		if !checksumEqual(hasher.Sum(nil), plainSum) {
+			ui.Fail()
+			if format == 3 {
+				return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
 			}
-			fmt.Println("Extracted archive.")
+			return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
 		}
-		return nil
+		return finishGet(ui, savePath, unzip)
 	}
+	if ui != nil {
+		ui.Fail()
+	} else {
+		waitUI.Fail()
+	}
+	if lastErr == nil {
+		lastErr = errStall
+	}
+	return fmt.Errorf("download: %w", lastErr)
+}
 
-	name, totalPlainLen, numChunks, plaintextChecksum, err := ReadEncryptedBlobChunkedHeader(br)
+func promptSecureKey() ([]byte, error) {
+	fmt.Print("Enter key (64 hex characters): ")
+	var keyHex string
+	if _, err := fmt.Scanln(&keyHex); err != nil {
+		return nil, fmt.Errorf("read key: %w", err)
+	}
+	keyHex = strings.TrimSpace(keyHex)
+	if len(keyHex) != 64 {
+		return nil, fmt.Errorf("key must be 64 hex characters (32 bytes)")
+	}
+	key, err := hex.DecodeString(keyHex)
 	if err != nil {
-		return fmt.Errorf("read blob header: %w", err)
+		return nil, fmt.Errorf("invalid hex key: %w", err)
 	}
-	savePath := resolveDownloadPath(outputPath, name)
-	if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
-		return err
-	}
-	out, err := os.Create(savePath)
-	if err != nil {
-		return fmt.Errorf("create file %s: %w", savePath, err)
-	}
-	defer out.Close()
-	hasher := sha256.New()
-	var downloaded int64
-	for i := uint32(0); i < numChunks; i++ {
-		chunk, err := ReadEncryptedBlobNextChunk(br, code)
-		if err != nil {
-			return fmt.Errorf("read chunk: %w", err)
+	return key, nil
+}
+
+func discardDownloadChunks(br io.Reader, n uint32, code string, secure bool, _ []byte) error {
+	for i := uint32(0); i < n; i++ {
+		if secure {
+			if _, _, err := ReadChunkRaw(br); err != nil {
+				return err
+			}
+			continue
 		}
-		if _, err := out.Write(chunk); err != nil {
-			return fmt.Errorf("write chunk: %w", err)
+		if _, err := ReadEncryptedBlobNextChunk(br, code); err != nil {
+			return err
 		}
-		hasher.Write(chunk)
-		downloaded += int64(len(chunk))
-		progress(downloaded, int64(totalPlainLen))
-	}
-	fmt.Println()
-	if !checksumEqual(hasher.Sum(nil), plaintextChecksum) {
-		return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
-	}
-	fmt.Printf("Downloaded: %s\n", savePath)
-	if unzip {
-		if err := extractTarGz(savePath); err != nil {
-			return fmt.Errorf("unzip: %w", err)
-		}
-		fmt.Println("Extracted archive.")
 	}
 	return nil
 }
 
-func requestIPFSMirror(serverAddr, code string) error {
-	conn, err := dialWithFallback(serverAddr)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	bw := bufio.NewWriterSize(conn, bufSize)
-	if err := WriteMessageType(bw, MsgIPFSRequest); err != nil {
-		return err
-	}
-	if err := WriteIPFSCodeRequest(bw, code); err != nil {
-		return err
-	}
-	if err := bw.Flush(); err != nil {
-		return err
-	}
-	status, err := ReadStatus(conn)
-	if err != nil {
-		return err
-	}
-	switch status {
-	case StatusOK:
-		return nil
-	case StatusNotFound:
-		return fmt.Errorf("code not found on server")
-	default:
-		return fmt.Errorf("server rejected IPFS mirror (status %d)", status)
-	}
-}
-
-func runClientIPFSStatus(code string) error {
-	if len(code) != CodeLength {
-		return fmt.Errorf("code must be 6 digits")
-	}
-	serverID := int(code[0] - '0')
-	if serverID < 0 || serverID > 9 {
-		return fmt.Errorf("invalid code: first digit must be 0–9 (server id)")
-	}
-	addrs, err := fetchServerList()
-	if err != nil {
-		return fmt.Errorf("fetch server list: %w", err)
-	}
-	if addrs[serverID] == "" {
-		return fmt.Errorf("server %d not in list", serverID)
-	}
-	conn, err := dialWithFallback(addrs[serverID])
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	bw := bufio.NewWriterSize(conn, bufSize)
-	if err := WriteMessageType(bw, MsgIPFSStatus); err != nil {
-		return err
-	}
-	if err := WriteIPFSCodeRequest(bw, code); err != nil {
-		return err
-	}
-	if err := bw.Flush(); err != nil {
-		return err
-	}
-
-	status, ipfsState, cid, link, errMsg, err := ReadIPFSStatusResponse(conn)
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-	if status == StatusNotFound {
-		fmt.Printf("Code %s: no IPFS upload requested\n", code)
-		return nil
-	}
-	if status != StatusOK {
-		if errMsg != "" {
-			return fmt.Errorf("%s", errMsg)
+func openDownload(addr, code string, skipChunks uint32) (conn net.Conn, br *bufio.Reader, format byte, serverSkipped bool, err error) {
+	try := func(resume bool) (net.Conn, *bufio.Reader, byte, bool, error) {
+		c, e := dialWithFallback(addr)
+		if e != nil {
+			return nil, nil, 0, false, e
 		}
-		return fmt.Errorf("server error (status %d)", status)
-	}
-
-	fmt.Printf("Code:   %s\n", code)
-	fmt.Printf("Status: %s\n", ipfsStateLabel(ipfsState))
-	switch ipfsState {
-	case IPFSStatePinned:
-		if u, parseErr := url.Parse(link); parseErr == nil {
-			if name := filepath.Base(u.Path); name != "" && name != "." && name != "/" {
-				fmt.Printf("File:   %s\n", name)
+		wc, watch := wrapWatched(c, 0)
+		bw := bufio.NewWriterSize(wc, bufSize)
+		if resume {
+			if e = WriteMessageType(bw, MsgResume); e != nil {
+				closeRetrain(c)
+				return nil, nil, 0, false, e
+			}
+			if e = WriteResumeRequest(bw, code, skipChunks); e != nil {
+				closeRetrain(c)
+				return nil, nil, 0, false, e
+			}
+		} else {
+			if e = WriteMessageType(bw, MsgDownload); e != nil {
+				closeRetrain(c)
+				return nil, nil, 0, false, e
+			}
+			if e = WriteDownloadRequest(bw, code); e != nil {
+				closeRetrain(c)
+				return nil, nil, 0, false, e
 			}
 		}
-		fmt.Printf("CID:    %s\n", cid)
-		fmt.Printf("Link:   %s\n", link)
-	case IPFSStateFailed:
-		if errMsg != "" {
-			fmt.Printf("Error:  %s\n", errMsg)
+		if e = bw.Flush(); e != nil {
+			closeRetrain(c)
+			return nil, nil, 0, false, e
 		}
-	case IPFSStateQueued, IPFSStateUploading:
-		fmt.Println("Upload in progress. Run again in a few seconds.")
-	case IPFSStateExpired:
-		fmt.Println("IPFS pin expired (removed after 30 min).")
+		r := bufio.NewReaderSize(wc, bufSize)
+		st, e := ReadStatus(r)
+		if e != nil {
+			closeRetrain(c)
+			return nil, nil, 0, false, e
+		}
+		if resume && st != StatusOK {
+			closeRetrain(c)
+			return nil, nil, 0, false, errStall // trigger fallback
+		}
+		if st == StatusNotFound {
+			closeRetrain(c)
+			return nil, nil, 0, false, fmt.Errorf("code unknown or expired (data kept 1 hour)")
+		}
+		if st != StatusOK {
+			closeRetrain(c)
+			return nil, nil, 0, false, fmt.Errorf("server error (status %d)", st)
+		}
+		fb := make([]byte, 1)
+		if _, e = io.ReadFull(r, fb); e != nil {
+			closeRetrain(c)
+			return nil, nil, 0, false, e
+		}
+		watch.reset()
+		return c, r, fb[0], resume, nil
+	}
+
+	if skipChunks > 0 {
+		c, r, f, skipped, e := try(true)
+		if e == nil {
+			return c, r, f, skipped, nil
+		}
+		if !isStall(e) && !strings.Contains(e.Error(), "server error") {
+			return nil, nil, 0, false, e
+		}
+		return try(false)
+	}
+	return try(false)
+}
+
+func finishGet(ui *sendUI, savePath string, unzip bool) error {
+	ui.DoneSaved(savePath)
+	if unzip {
+		if err := extractTarGz(savePath); err != nil {
+			return fmt.Errorf("unzip: %w", err)
+		}
+		printSendPhase("Extracted archive.")
 	}
 	return nil
 }

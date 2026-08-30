@@ -143,7 +143,6 @@ var commonLongFlags = map[string]string{
 	"dir":      "d",
 	"web":      "w",
 	"maxsize":  "m",
-	"ipfs":     "I",
 }
 
 func printGlobalUsage() {
@@ -152,10 +151,9 @@ func printGlobalUsage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  server       listen for uploads; store encrypted data")
-	fmt.Println("  servers      test each server: ping, free space, 2s download & 2s upload")
+	fmt.Println("  servers      test each server: ping, space, speed, BGP ASN/path")
 	fmt.Println("  send         generate code, encrypt file, upload; you get the 6-digit code")
 	fmt.Println("  get          download by code; decrypt with same code (or with key for secure uploads)")
-	fmt.Println("  status       show IPFS upload status, CID and download link for a code")
 	fmt.Println("  secure send  encrypt with your own 256-bit key; server assigns code; use get + key to download")
 	fmt.Println()
 	fmt.Printf("Run '%s <command> -h' for command-specific help.\n", name)
@@ -196,7 +194,6 @@ func printSendUsage() {
 	fmt.Println("  -s, --server=N     server id 0–9 to use (default: auto-probe)")
 	fmt.Println("  -t, --longterm=D   store for e.g. 7d or 24h (max 150 MB; server must support --longterm)")
 	fmt.Println("  -z, --zip          pack file or directory into tar.gz before sending")
-	fmt.Println("  -I, --ipfs         also upload decrypted file to IPFS (pinned 30 min on server)")
 	fmt.Println("  -l, --local        local LAN send mode (no server)")
 	fmt.Println("  -h, --help         show this help")
 	fmt.Println()
@@ -246,16 +243,6 @@ func printServersUsage() {
 	fmt.Println("  -h, --help    show this help")
 }
 
-func printStatusUsage() {
-	name := progName()
-	fmt.Printf("Usage: %s status <6-digit-code>\n\n", name)
-	fmt.Println("Show IPFS upload status for a file sent with --ipfs.")
-	fmt.Println("Displays upload progress, CID and HTTPS gateway link when ready.")
-	fmt.Println()
-	fmt.Println("Options:")
-	fmt.Println("  -h, --help    show this help")
-}
-
 func runServerCommand(args []string) {
 	fs := newCommandFlagSet("server", printServerUsage)
 	serverID := fs.Int("i", 0, "server id 0–9 (first digit of generated codes)")
@@ -294,7 +281,6 @@ func runSendCommand(args []string) {
 	clientSendServerID := fs.Int("s", -1, "server id 0–9 to use (default: auto-probe)")
 	clientSendLongTerm := fs.String("t", "", "store for e.g. 7d or 24h (max 150 MB; server must support --longterm)")
 	clientSendZip := fs.Bool("z", false, "pack file or directory into tar.gz before sending")
-	clientSendIPFS := fs.Bool("I", false, "also upload decrypted file to IPFS (pinned 30 min on server)")
 	clientSendLocal := fs.Bool("l", false, "local LAN send mode")
 
 	help, err := fs.Parse(args, commonLongFlags)
@@ -333,7 +319,7 @@ func runSendCommand(args []string) {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	if err := runClientSend(sendPath, addr, *clientSendServerID, longTermSec, *clientSendIPFS); err != nil {
+	if err := runClientSend(sendPath, addr, *clientSendServerID, longTermSec); err != nil {
 		exitCmdError("send", err)
 	}
 }
@@ -437,24 +423,6 @@ func runSecureSendCommand(args []string) {
 	}
 	if err := runClientSecureSend(sendPath, addr, *secureServerID, longTermSec); err != nil {
 		exitCmdError("secure send", err)
-	}
-}
-
-func runStatusCommand(args []string) {
-	fs := newCommandFlagSet("status", printStatusUsage)
-	help, err := fs.Parse(args, commonLongFlags)
-	if help {
-		exitHelp(printStatusUsage)
-	}
-	if err != nil {
-		exitCmdUsage("status", "%s", err)
-	}
-	pos := fs.Args()
-	if len(pos) < 1 {
-		exitCmdUsage("status", "missing 6-digit code argument")
-	}
-	if err := runClientIPFSStatus(pos[0]); err != nil {
-		exitCmdError("status", err)
 	}
 }
 

@@ -18,8 +18,7 @@ const (
 	MsgSecureUpload = 'S'
 	MsgTest         = 'T'
 	MsgBench        = 'B'
-	MsgIPFSRequest  = 'F' // client requests IPFS mirror after upload
-	MsgIPFSStatus   = 'P' // client queries IPFS upload status
+	MsgResume       = 'R' // download from chunk offset (retrain)
 )
 
 const TestPayloadSize = 256 * 1024 // 256 KB for bandwidth probe
@@ -300,6 +299,22 @@ func WriteDownloadRequest(w io.Writer, code string) error {
 	return err
 }
 
+func WriteResumeRequest(w io.Writer, code string, skipChunks uint32) error {
+	if err := WriteDownloadRequest(w, code); err != nil {
+		return err
+	}
+	return binary.Write(w, binary.BigEndian, skipChunks)
+}
+
+func ReadResumeRequest(r io.Reader) (code string, skipChunks uint32, err error) {
+	code, err = ReadDownloadRequest(r)
+	if err != nil {
+		return "", 0, err
+	}
+	err = binary.Read(r, binary.BigEndian, &skipChunks)
+	return code, skipChunks, err
+}
+
 func ReadDownloadRequest(r io.Reader) (string, error) {
 	b := make([]byte, CodeLength)
 	_, err := io.ReadFull(r, b)
@@ -577,6 +592,10 @@ func WriteEncryptedBlob(w io.Writer, name string, plaintextChecksum []byte, nonc
 }
 
 func WriteEncryptedBlobChunked(w io.Writer, name string, plaintextChecksum []byte, chunks []EncryptedChunk) error {
+	return WriteEncryptedBlobChunkedSkip(w, name, plaintextChecksum, chunks, 0)
+}
+
+func WriteEncryptedBlobChunkedSkip(w io.Writer, name string, plaintextChecksum []byte, chunks []EncryptedChunk, skipChunks uint32) error {
 	nameBytes := []byte(name)
 	if len(nameBytes) > 0xFFFF {
 		nameBytes = nameBytes[:0xFFFF]
@@ -602,7 +621,13 @@ func WriteEncryptedBlobChunked(w io.Writer, name string, plaintextChecksum []byt
 	if _, err := w.Write(plaintextChecksum); err != nil {
 		return err
 	}
-	for _, c := range chunks {
+	if skipChunks > uint32(len(chunks)) {
+		skipChunks = uint32(len(chunks))
+	}
+	for i, c := range chunks {
+		if uint32(i) < skipChunks {
+			continue
+		}
 		if _, err := w.Write(c.Nonce[:]); err != nil {
 			return err
 		}
@@ -711,108 +736,6 @@ func ReadEncryptedBlob(r io.Reader, progress ProgressFunc) (name string, plainte
 		return "", nil, nil, nil, err
 	}
 	return name, plaintextChecksum, nonce, sealed, nil
-}
-
-func WriteIPFSCodeRequest(w io.Writer, code string) error {
-	if len(code) != CodeLength {
-		return errors.New("code must be 6 digits")
-	}
-	_, err := w.Write([]byte(code))
-	return err
-}
-
-func ReadIPFSCodeRequest(r io.Reader) (string, error) {
-	b := make([]byte, CodeLength)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
-func SendIPFSStatusResponse(w io.Writer, status byte, ipfsState byte, cid, url, errMsg string) error {
-	if _, err := w.Write([]byte{status, ipfsState}); err != nil {
-		return err
-	}
-	if status != StatusOK {
-		return nil
-	}
-	cidBytes := []byte(cid)
-	if len(cidBytes) > 0xFFFF {
-		cidBytes = cidBytes[:0xFFFF]
-	}
-	if err := binary.Write(w, binary.BigEndian, uint16(len(cidBytes))); err != nil {
-		return err
-	}
-	if _, err := w.Write(cidBytes); err != nil {
-		return err
-	}
-	urlBytes := []byte(url)
-	if len(urlBytes) > 0xFFFF {
-		urlBytes = urlBytes[:0xFFFF]
-	}
-	if err := binary.Write(w, binary.BigEndian, uint16(len(urlBytes))); err != nil {
-		return err
-	}
-	if _, err := w.Write(urlBytes); err != nil {
-		return err
-	}
-	errBytes := []byte(errMsg)
-	if len(errBytes) > 0xFFFF {
-		errBytes = errBytes[:0xFFFF]
-	}
-	if err := binary.Write(w, binary.BigEndian, uint16(len(errBytes))); err != nil {
-		return err
-	}
-	if len(errBytes) > 0 {
-		_, err := w.Write(errBytes)
-		return err
-	}
-	return nil
-}
-
-func ReadIPFSStatusResponse(r io.Reader) (status, ipfsState byte, cid, url, errMsg string, err error) {
-	hdr := make([]byte, 2)
-	if _, err = io.ReadFull(r, hdr); err != nil {
-		return 0, 0, "", "", "", err
-	}
-	status, ipfsState = hdr[0], hdr[1]
-	if status != StatusOK {
-		return status, ipfsState, "", "", "", nil
-	}
-	var cidLen uint16
-	if err = binary.Read(r, binary.BigEndian, &cidLen); err != nil {
-		return 0, 0, "", "", "", err
-	}
-	if cidLen > 0 {
-		b := make([]byte, cidLen)
-		if _, err = io.ReadFull(r, b); err != nil {
-			return 0, 0, "", "", "", err
-		}
-		cid = string(b)
-	}
-	var urlLen uint16
-	if err = binary.Read(r, binary.BigEndian, &urlLen); err != nil {
-		return 0, 0, "", "", "", err
-	}
-	if urlLen > 0 {
-		b := make([]byte, urlLen)
-		if _, err = io.ReadFull(r, b); err != nil {
-			return 0, 0, "", "", "", err
-		}
-		url = string(b)
-	}
-	var errLen uint16
-	if err = binary.Read(r, binary.BigEndian, &errLen); err != nil {
-		return 0, 0, "", "", "", err
-	}
-	if errLen > 0 {
-		b := make([]byte, errLen)
-		if _, err = io.ReadFull(r, b); err != nil {
-			return 0, 0, "", "", "", err
-		}
-		errMsg = string(b)
-	}
-	return status, ipfsState, cid, url, errMsg, nil
 }
 
 func checksumEqual(a, b []byte) bool {

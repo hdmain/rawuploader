@@ -280,23 +280,11 @@ func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize 
 		return err
 	}
 
-	ipfs := newIPFSManager(dataDir)
-	if err := ipfs.loadIndex(); err != nil {
-		fmt.Fprintf(os.Stderr, "tcpraw server: load IPFS index: %v\n", err)
-	}
-	if err := ipfs.initAndStart(); err != nil {
-		fmt.Fprintf(os.Stderr, "tcpraw server: IPFS init/start failed: %v (IPFS mirror disabled)\n", err)
-		ipfs = nil
-	}
-
 	go func() {
 		tick := time.NewTicker(CleanupInterval)
 		defer tick.Stop()
 		for range tick.C {
 			st.cleanupExpired()
-			if ipfs != nil {
-				ipfs.cleanupExpired()
-			}
 		}
 	}()
 
@@ -321,7 +309,7 @@ func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize 
 			fmt.Fprintf(os.Stderr, "accept: %v\n", err)
 			continue
 		}
-		go handleConn(conn, st, rl, serverID, ipfs)
+		go handleConn(conn, st, rl, serverID)
 	}
 }
 
@@ -380,7 +368,7 @@ func extractIP(addr string) string {
 	return addr
 }
 
-func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int, ipfs *ipfsManager) {
+func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int) {
 	defer conn.Close()
 	setTCPBuffers(conn)
 	r := bufio.NewReaderSize(conn, bufSize)
@@ -397,62 +385,25 @@ func handleConn(conn net.Conn, st *store, rl *rateLimiter, serverID int, ipfs *i
 	case MsgUpload:
 		handleUpload(conn, r, st)
 	case MsgDownload:
-		handleDownload(conn, r, st, rl)
+		handleDownload(conn, r, st, rl, 0)
+	case MsgResume:
+		code, skip, err := ReadResumeRequest(r)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read resume: %v\n", err)
+			SendStatus(conn, StatusError)
+			return
+		}
+		handleDownloadCode(conn, st, rl, code, skip)
 	case MsgSecureUpload:
 		handleSecureUpload(conn, r, st, serverID)
 	case MsgTest:
 		handleTest(conn, r, st)
 	case MsgBench:
 		handleBench(conn, r, st)
-	case MsgIPFSRequest:
-		handleIPFSRequest(conn, r, st, ipfs)
-	case MsgIPFSStatus:
-		handleIPFSStatus(conn, r, ipfs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown type: %c\n", msgType)
 		SendStatus(conn, StatusError)
 	}
-}
-
-func handleIPFSRequest(conn net.Conn, r io.Reader, st *store, ipfs *ipfsManager) {
-	if ipfs == nil {
-		SendStatus(conn, StatusError)
-		return
-	}
-	code, err := ReadIPFSCodeRequest(r)
-	if err != nil {
-		SendStatus(conn, StatusError)
-		return
-	}
-	if _, ok := st.get(code); !ok {
-		SendStatus(conn, StatusNotFound)
-		return
-	}
-	if err := ipfs.queueUpload(st, code); err != nil {
-		fmt.Fprintf(os.Stderr, "IPFS queue %s: %v\n", code, err)
-		SendStatus(conn, StatusError)
-		return
-	}
-	fmt.Printf("IPFS mirror queued for code %s\n", code)
-	SendStatus(conn, StatusOK)
-}
-
-func handleIPFSStatus(conn net.Conn, r io.Reader, ipfs *ipfsManager) {
-	code, err := ReadIPFSCodeRequest(r)
-	if err != nil {
-		SendStatus(conn, StatusError)
-		return
-	}
-	if ipfs == nil {
-		_ = SendIPFSStatusResponse(conn, StatusError, IPFSStateNone, "", "", "IPFS not available on this server")
-		return
-	}
-	j, ok := ipfs.getJob(code)
-	if !ok {
-		_ = SendIPFSStatusResponse(conn, StatusNotFound, IPFSStateNone, "", "", "")
-		return
-	}
-	_ = SendIPFSStatusResponse(conn, StatusOK, j.State, j.CID, j.URL, j.Error)
 }
 
 func decryptBlobToWriter(st *store, code string, blob *StoredBlob, w io.Writer) error {
@@ -951,16 +902,20 @@ func handleSecureUploadChunked(conn net.Conn, r io.Reader, st *store, serverID i
 	}
 }
 
-func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
-	ip := extractIP(conn.RemoteAddr().String())
-	if !rl.allow(ip) {
-		fmt.Fprintf(os.Stderr, "rate limit / ban: %s\n", ip)
-		SendStatus(conn, StatusError)
-		return
-	}
+func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter, skipChunks uint32) {
 	code, err := ReadDownloadRequest(r)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read code: %v\n", err)
+		SendStatus(conn, StatusError)
+		return
+	}
+	handleDownloadCode(conn, st, rl, code, skipChunks)
+}
+
+func handleDownloadCode(conn net.Conn, st *store, rl *rateLimiter, code string, skipChunks uint32) {
+	ip := extractIP(conn.RemoteAddr().String())
+	if !rl.allow(ip) {
+		fmt.Fprintf(os.Stderr, "rate limit / ban: %s\n", ip)
 		SendStatus(conn, StatusError)
 		return
 	}
@@ -971,7 +926,11 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		return
 	}
 
-	fmt.Println("info: sending encrypted file for code", code)
+	if skipChunks > 0 {
+		fmt.Printf("info: sending encrypted file for code %s (skip %d chunks)\n", code, skipChunks)
+	} else {
+		fmt.Println("info: sending encrypted file for code", code)
+	}
 	if err := SendStatus(conn, StatusOK); err != nil {
 		return
 	}
@@ -980,7 +939,7 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		if _, err := bw.Write([]byte{3}); err != nil {
 			return
 		}
-		if err := sendChunkedFromFile(bw, st.dataPath(code), blob); err != nil {
+		if err := sendChunkedFromFileSkip(bw, st.dataPath(code), blob, skipChunks); err != nil {
 			fmt.Fprintf(os.Stderr, "send secure chunked: %v\n", err)
 			return
 		}
@@ -996,7 +955,7 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		if _, err := bw.Write([]byte{1}); err != nil {
 			return
 		}
-		if err := sendChunkedFromFile(bw, st.dataPath(code), blob); err != nil {
+		if err := sendChunkedFromFileSkip(bw, st.dataPath(code), blob, skipChunks); err != nil {
 			fmt.Fprintf(os.Stderr, "send (stream): %v\n", err)
 			return
 		}
@@ -1004,7 +963,7 @@ func handleDownload(conn net.Conn, r io.Reader, st *store, rl *rateLimiter) {
 		if _, err := bw.Write([]byte{1}); err != nil {
 			return
 		}
-		if err := WriteEncryptedBlobChunked(bw, blob.Name, blob.PlaintextChecksum, blob.Chunks); err != nil {
+		if err := WriteEncryptedBlobChunkedSkip(bw, blob.Name, blob.PlaintextChecksum, blob.Chunks, skipChunks); err != nil {
 			fmt.Fprintf(os.Stderr, "send: %v\n", err)
 			return
 		}

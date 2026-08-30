@@ -2,20 +2,20 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 )
 
 const (
-	ansiReset   = "\033[0m"
-	ansiBold    = "\033[1m"
-	ansiDim     = "\033[2m"
-	ansiGreen   = "\033[32m"
-	ansiYellow  = "\033[33m"
-	ansiBlue    = "\033[34m"
-	ansiMagenta = "\033[35m"
-	ansiCyan    = "\033[36m"
+	ansiReset  = "\033[0m"
+	ansiBold   = "\033[1m"
+	ansiDim    = "\033[2m"
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
+	ansiBlue   = "\033[34m"
+	ansiCyan   = "\033[36m"
 )
 
 func stdoutIsTTY() bool {
@@ -33,23 +33,33 @@ func style(enabled bool, code, s string) string {
 	return code + s + ansiReset
 }
 
-// sendUI keeps send feedback on a single live line (TTY) or sparse lines (pipe).
+// sendUI keeps transfer feedback on a single live line (TTY) or sparse lines (pipe).
 type sendUI struct {
-	name      string
-	size      int64
-	tty       bool
-	start     time.Time
-	last      time.Time
-	lastDone  int64
-	live      bool // true while a \r status line is active
-	barWidth  int
-	showBar   bool
+	name     string
+	size     int64
+	arrow    string
+	tty      bool
+	start    time.Time
+	last     time.Time
+	lastDone int64
+	live     bool // true while a \r status line is active
+	barWidth int
+	showBar  bool
 }
 
 func newSendUI(name string, size int64) *sendUI {
+	return newXferUI("↑", name, size)
+}
+
+func newRecvUI(name string, size int64) *sendUI {
+	return newXferUI("↓", name, size)
+}
+
+func newXferUI(arrow, name string, size int64) *sendUI {
 	return &sendUI{
 		name:     name,
 		size:     size,
+		arrow:    arrow,
 		tty:      stdoutIsTTY(),
 		start:    time.Now(),
 		barWidth: 14,
@@ -75,6 +85,16 @@ func (u *sendUI) endLive() {
 	}
 }
 
+func (u *sendUI) replaceLine(line string) {
+	if u.tty {
+		fmt.Printf("\r%s\033[K\n", line)
+		u.live = false
+		return
+	}
+	fmt.Println(line)
+	u.live = false
+}
+
 func (u *sendUI) beginTransfer() {
 	u.start = time.Now()
 	u.last = time.Time{}
@@ -87,7 +107,7 @@ func (u *sendUI) Status(phase string) {
 		return
 	}
 	line := fmt.Sprintf("%s %s  %s  %s",
-		style(true, ansiBlue, "↑"),
+		style(true, ansiBlue, u.arrow),
 		style(true, ansiBold, u.name),
 		style(true, ansiDim, formatBytes(float64(u.size))),
 		style(true, ansiDim, phase),
@@ -138,7 +158,7 @@ func (u *sendUI) Progress(_ string, done, total int64) {
 	bar := style(u.tty, ansiCyan, barBody)
 
 	line := fmt.Sprintf("%s %s  %s  %s %4.0f%%%s%s",
-		style(u.tty, ansiBlue, "↑"),
+		style(u.tty, ansiBlue, u.arrow),
 		style(u.tty, ansiBold, u.name),
 		bar,
 		style(u.tty, ansiDim, formatBytes(float64(done))+"/"+formatBytes(float64(total))),
@@ -159,46 +179,63 @@ func (u *sendUI) FinishProgress(total int64) {
 	}
 }
 
-// Done replaces the live line with a clear success summary.
-func (u *sendUI) Done(code string, storageDurationSec uint32, ipfsNote string) {
+func (u *sendUI) Done(code string, storageDurationSec uint32) {
 	keep := formatValidDuration(storageDurationSec)
-	line := fmt.Sprintf("%s File sent (encrypted). Your code: %s (%s)",
+	u.replaceLine(fmt.Sprintf("%s File sent (encrypted). Your code: %s (%s)",
 		style(u.tty, ansiGreen+ansiBold, "✓"),
 		style(u.tty, ansiBold+ansiCyan, code),
 		style(u.tty, ansiDim, keep),
-	)
-	if u.tty {
-		fmt.Printf("\r%s\033[K\n", line)
-		u.live = false
-	} else {
-		fmt.Println(line)
-	}
-	if ipfsNote != "" {
-		fmt.Printf("  %s %s\n", style(u.tty, ansiMagenta, "ipfs"), style(u.tty, ansiDim, ipfsNote))
-	}
+	))
 }
 
-// DoneSecure prints success with key on the next line.
 func (u *sendUI) DoneSecure(code, keyHex string, storageDurationSec uint32) {
 	keep := formatValidDuration(storageDurationSec)
-	line := fmt.Sprintf("%s File sent (secure). Your code: %s (%s)",
+	u.replaceLine(fmt.Sprintf("%s File sent (secure). Your code: %s (%s)",
 		style(u.tty, ansiGreen+ansiBold, "✓"),
 		style(u.tty, ansiBold+ansiCyan, code),
 		style(u.tty, ansiDim, keep),
-	)
-	if u.tty {
-		fmt.Printf("\r%s\033[K\n", line)
-		u.live = false
-	} else {
-		fmt.Println(line)
-	}
+	))
 	fmt.Printf("Key (save it – needed to download): %s\n", style(u.tty, ansiBold+ansiYellow, keyHex))
 	fmt.Println("Without the key the file cannot be decrypted.")
 }
 
-// Fail ends the live line before an error is printed by the caller.
+func (u *sendUI) DoneSaved(path string) {
+	u.replaceLine(fmt.Sprintf("%s Downloaded: %s",
+		style(u.tty, ansiGreen+ansiBold, "✓"),
+		style(u.tty, ansiBold, path),
+	))
+}
+
+func (u *sendUI) DoneShared() {
+	u.replaceLine(fmt.Sprintf("%s Sent to peer  %s  %s",
+		style(u.tty, ansiGreen+ansiBold, "✓"),
+		style(u.tty, ansiBold, u.name),
+		style(u.tty, ansiDim, formatBytes(float64(u.size))),
+	))
+}
+
 func (u *sendUI) Fail() {
 	u.endLive()
+}
+
+func (u *sendUI) progressWriter(w io.Writer, total int64) io.Writer {
+	return &xferCounter{w: w, ui: u, total: total}
+}
+
+type xferCounter struct {
+	w     io.Writer
+	ui    *sendUI
+	done  int64
+	total int64
+}
+
+func (c *xferCounter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if n > 0 {
+		c.done += int64(n)
+		c.ui.Progress("", c.done, c.total)
+	}
+	return n, err
 }
 
 func formatETA(seconds float64) string {

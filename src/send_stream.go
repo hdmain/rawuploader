@@ -8,6 +8,10 @@ import (
 
 // sendChunkedFromFile sends encrypted chunks from the .dat file in chunked protocol format.
 func sendChunkedFromFile(w io.Writer, dataPath string, blob *StoredBlob) error {
+	return sendChunkedFromFileSkip(w, dataPath, blob, 0)
+}
+
+func sendChunkedFromFileSkip(w io.Writer, dataPath string, blob *StoredBlob, skipChunks uint32) error {
 	df, err := os.Open(dataPath)
 	if err != nil {
 		return err
@@ -34,17 +38,23 @@ func sendChunkedFromFile(w io.Writer, dataPath string, blob *StoredBlob) error {
 		return err
 	}
 
+	if skipChunks > blob.NumChunks {
+		skipChunks = blob.NumChunks
+	}
 	for i := uint32(0); i < blob.NumChunks; i++ {
 		var header [16]byte
 		if _, err := io.ReadFull(df, header[:16]); err != nil {
 			return err
 		}
-		if _, err := w.Write(header[:16]); err != nil {
-			return err
-		}
 		sealedLen := binary.BigEndian.Uint32(header[12:16])
 		sealed := make([]byte, sealedLen)
 		if _, err := io.ReadFull(df, sealed); err != nil {
+			return err
+		}
+		if i < skipChunks {
+			continue
+		}
+		if _, err := w.Write(header[:16]); err != nil {
 			return err
 		}
 		if _, err := w.Write(sealed); err != nil {

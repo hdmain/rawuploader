@@ -287,21 +287,24 @@ func handleExistingDownload(savePath string, expectedChecksum []byte, unzip bool
 		return false, nil
 	}
 
+	printSendPhase(fmt.Sprintf("Local file already exists: %s", savePath))
+	printSendPhase("Checking local file checksum (SHA-256)…")
 	actualChecksum := <-checksumFileAsync(savePath)
 	if !checksumEqual(actualChecksum, expectedChecksum) {
+		printSendPhase("Local checksum mismatch – will re-download")
 		return false, nil
 	}
 
 	if unzip {
-		fmt.Printf("File already exists with matching checksum, extracting only: %s\n", savePath)
+		printSendPhase(fmt.Sprintf("Checksum match – extracting archive: %s", savePath))
 		if err := extractTarGz(savePath); err != nil {
 			return true, fmt.Errorf("unzip: %w", err)
 		}
-		fmt.Println("Extracted archive.")
+		printSendPhase("Extracted archive.")
 		return true, nil
 	}
 
-	fmt.Printf("File already exists with matching checksum: %s\n", savePath)
+	printSendPhase(fmt.Sprintf("Checksum match – skipping download: %s", savePath))
 	return true, nil
 }
 
@@ -807,7 +810,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 
 	hasher := sha256.New()
 	chunkBuf := make([]byte, FileChunkSize)
-	ui.Status("checksum")
+	ui.Status("Computing local SHA-256 checksum…")
 	ui.beginTransfer()
 	var totalRead int64
 	for totalRead < size {
@@ -815,7 +818,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 		if n > 0 {
 			hasher.Write(chunkBuf[:n])
 			totalRead += int64(n)
-			ui.Progress("checksum", totalRead, size)
+			ui.Progress("Computing local SHA-256 checksum…", totalRead, size)
 		}
 		if err == io.EOF {
 			break
@@ -828,11 +831,12 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 	ui.FinishProgress(size)
 	plaintextChecksum := hasher.Sum(nil)
 	numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
+	ui.Status("Local checksum ready")
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetrains; attempt++ {
 		if attempt > 0 {
-			ui.Status(fmt.Sprintf("retrain %d", attempt))
+			ui.Status(fmt.Sprintf("Path stalled – reopening connection (retrain %d)…", attempt))
 		}
 		conn, serverID, err := connectSendTarget(addr, serverIDHint, size, ui)
 		if err != nil {
@@ -848,6 +852,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 
 		wc, watch := wrapWatched(conn, size)
 		bw := bufio.NewWriterSize(wc, bufSize)
+		ui.Status("Encrypting and uploading…")
 		if err := WriteMessageType(bw, MsgUpload); err != nil {
 			closeRetrain(conn)
 			ui.Fail()
@@ -856,7 +861,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 		watch.reset()
 		ui.beginTransfer()
 		progress := func(sent, total int64) {
-			ui.Progress("upload", sent, total)
+			ui.Progress("Encrypting and uploading…", sent, total)
 		}
 		getChunk := func() ([]byte, error) {
 			n, err := f.Read(chunkBuf)
@@ -884,7 +889,7 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 		}
 		ui.FinishProgress(size)
 
-		ui.Status("confirm")
+		ui.Status("Waiting for server confirmation…")
 		status, err := ReadStatus(wc)
 		if isRetrainable(err) {
 			closeRetrain(conn)
@@ -919,11 +924,12 @@ func runClientSend(filePath string, addr string, serverIDHint int, storageDurati
 
 func connectSendTarget(addr string, serverIDHint int, fileSize int64, ui *sendUI) (net.Conn, int, error) {
 	if addr != "" {
-		ui.Status("connect " + addr)
+		ui.Status("Connecting to " + addr + "…")
 		conn, err := dialWithFallback(addr)
 		return conn, 0, err
 	}
 	if serverIDHint >= 0 && serverIDHint <= 9 {
+		ui.Status("Fetching server list…")
 		addrs, fetchErr := fetchServerList()
 		if fetchErr != nil {
 			return nil, 0, fmt.Errorf("fetch server list: %w", fetchErr)
@@ -931,16 +937,16 @@ func connectSendTarget(addr string, serverIDHint int, fileSize int64, ui *sendUI
 		if addrs[serverIDHint] == "" {
 			return nil, 0, fmt.Errorf("server %d not in list", serverIDHint)
 		}
-		ui.Status(fmt.Sprintf("connect #%d", serverIDHint))
+		ui.Status(fmt.Sprintf("Connecting to server #%d (%s)…", serverIDHint, addrs[serverIDHint]))
 		conn, err := dialWithFallback(addrs[serverIDHint])
 		return conn, serverIDHint, err
 	}
-	ui.Status("probing")
+	ui.Status("Probing servers for best route (speed + BGP)…")
 	conn, serverID, summary, err := tryServersFromList(fileSize)
 	if err != nil {
 		return nil, 0, err
 	}
-	ui.Status(summary)
+	ui.Status("Best route: " + summary)
 	return conn, serverID, nil
 }
 
@@ -967,7 +973,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 
 	baseName := filepath.Base(filePath)
 	ui := newSendUI(baseName, size)
-	ui.Status("secure")
+	ui.Status("Preparing secure upload (generating 256-bit key)…")
 
 	key := make([]byte, SecureKeySize)
 	if _, err := io.ReadFull(crand.Reader, key); err != nil {
@@ -978,7 +984,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 	var lastErr error
 	for attempt := 0; attempt <= maxRetrains; attempt++ {
 		if attempt > 0 {
-			ui.Status(fmt.Sprintf("retrain %d", attempt))
+			ui.Status(fmt.Sprintf("Path stalled – reopening connection (retrain %d)…", attempt))
 			if _, err := f.Seek(0, io.SeekStart); err != nil {
 				ui.Fail()
 				return fmt.Errorf("seek file: %w", err)
@@ -999,7 +1005,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 		watch.reset()
 
 		if size <= maxSecureLoadRAM {
-			ui.Status("encrypt")
+			ui.Status("Encrypting file with your key…")
 			plaintext, err := io.ReadAll(f)
 			if err != nil {
 				closeRetrain(conn)
@@ -1013,9 +1019,10 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 				ui.Fail()
 				return fmt.Errorf("encrypt: %w", err)
 			}
+			ui.Status("Uploading encrypted file…")
 			ui.beginTransfer()
 			progress := func(sent, total int64) {
-				ui.Progress("upload", sent, total)
+				ui.Progress("Uploading encrypted file…", sent, total)
 			}
 			if _, err := bw.Write([]byte{0}); err != nil {
 				closeRetrain(conn)
@@ -1047,7 +1054,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 			}
 			ui.FinishProgress(int64(len(sealed)))
 		} else {
-			ui.Status("checksum")
+			ui.Status("Computing local SHA-256 checksum…")
 			if _, err := bw.Write([]byte{1}); err != nil {
 				closeRetrain(conn)
 				if isRetrainable(err) {
@@ -1066,7 +1073,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 				if n > 0 {
 					hasher.Write(chunkBuf[:n])
 					totalRead += int64(n)
-					ui.Progress("checksum", totalRead, size)
+					ui.Progress("Computing local SHA-256 checksum…", totalRead, size)
 				}
 				if err == io.EOF {
 					break
@@ -1080,6 +1087,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 			ui.FinishProgress(size)
 			plaintextChecksum := hasher.Sum(nil)
 			numChunks := uint32((size + int64(FileChunkSize) - 1) / int64(FileChunkSize))
+			ui.Status("Sending secure upload header…")
 			if err := WriteSecureUploadChunkedHeader(bw, baseName, size, storageDurationSec, numChunks, plaintextChecksum); err != nil {
 				closeRetrain(conn)
 				ui.Fail()
@@ -1091,6 +1099,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 				return fmt.Errorf("seek file: %w", err)
 			}
 			watch.reset()
+			ui.Status("Encrypting and uploading chunks…")
 			ui.beginTransfer()
 			var sent int64
 			var xerr error
@@ -1107,7 +1116,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 						break
 					}
 					sent += int64(n)
-					ui.Progress("upload", sent, size)
+					ui.Progress("Encrypting and uploading chunks…", sent, size)
 				}
 				if err == io.EOF {
 					break
@@ -1133,7 +1142,7 @@ func runClientSecureSend(filePath string, addr string, serverIDHint int, storage
 			ui.FinishProgress(size)
 		}
 
-		ui.Status("confirm")
+		ui.Status("Waiting for server confirmation…")
 		status, code, err := ReadCodeResponse(wc)
 		if isRetrainable(err) {
 			closeRetrain(conn)
@@ -1167,6 +1176,8 @@ func runClientGet(code, outputPath string, unzip bool) error {
 	if serverID < 0 || serverID > 9 {
 		return fmt.Errorf("invalid code: first digit must be 0–9 (server id)")
 	}
+	waitUI := newRecvUI(code, 0)
+	waitUI.Status("Fetching server list…")
 	addrs, err := fetchServerList()
 	if err != nil {
 		return fmt.Errorf("fetch server list: %w", err)
@@ -1197,16 +1208,17 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		}
 	}()
 
-	waitUI := newRecvUI(code, 0)
-	waitUI.Status("waiting")
+	waitUI.Status(fmt.Sprintf("Connecting to server #%d (%s)…", serverID, addr))
 
 	for attempt := 0; attempt <= maxRetrains; attempt++ {
 		if attempt > 0 {
-			waitUI.Status(fmt.Sprintf("retrain %d", attempt))
+			msg := fmt.Sprintf("Path stalled – reopening connection (retrain %d)…", attempt)
+			waitUI.Status(msg)
 			if ui != nil {
-				ui.Status(fmt.Sprintf("retrain %d", attempt))
+				ui.Status(msg)
 			}
 		}
+		waitUI.Status("Requesting file info from server…")
 		conn, br, fmtByte, serverSkipped, err := openDownload(addr, code, skipChunks)
 		if err != nil {
 			waitUI.Fail()
@@ -1218,6 +1230,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		}
 
 		if format == 0 || format == 2 {
+			waitUI.Status("Reading file metadata…")
 			name, plaintextChecksum, nonce, sealedLen, err := ReadEncryptedBlobHeader(br)
 			if err != nil {
 				closeRetrain(conn)
@@ -1229,14 +1242,18 @@ func runClientGet(code, outputPath string, unzip bool) error {
 				return fmt.Errorf("read encrypted blob header: %w", err)
 			}
 			savePath = resolveDownloadPath(outputPath, name)
+			waitUI.Status(fmt.Sprintf("File info: %s (%s encrypted)", name, formatBytes(float64(sealedLen))))
 			if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
 				closeRetrain(conn)
 				waitUI.Fail()
 				return err
 			}
 			recv := newRecvUI(name, int64(sealedLen))
+			recv.Status("Downloading encrypted data…")
 			recv.beginTransfer()
-			sealed, err := ReadEncryptedBlobBody(br, sealedLen, func(done, total int64) { recv.Progress("download", done, total) })
+			sealed, err := ReadEncryptedBlobBody(br, sealedLen, func(done, total int64) {
+				recv.Progress("Downloading encrypted data…", done, total)
+			})
 			closeRetrain(conn)
 			if isRetrainable(err) {
 				lastErr = err
@@ -1253,30 +1270,35 @@ func runClientGet(code, outputPath string, unzip bool) error {
 				if err != nil {
 					return err
 				}
+				recv.Status("Decrypting with provided key…")
 				plaintext, err := decryptWithKey(key, nonce, sealed)
 				if err != nil {
 					return fmt.Errorf("decrypt: %w", err)
 				}
+				recv.Status("Verifying SHA-256 checksum…")
 				sum := sha256.Sum256(plaintext)
 				if !checksumEqual(sum[:], plaintextChecksum) {
 					return fmt.Errorf("checksum mismatch – wrong key or corrupted data")
 				}
+				recv.Status("Saving file…")
 				if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
 					return fmt.Errorf("write file %s: %w", savePath, err)
 				}
 				return finishGet(recv, savePath, unzip)
 			}
-			recv.Status("decrypt")
+			recv.Status("Decrypting with code…")
 			plaintext, err := decryptWithCode(code, nonce, sealed)
 			if err != nil {
 				recv.Fail()
 				return fmt.Errorf("decrypt: %w", err)
 			}
+			recv.Status("Verifying SHA-256 checksum…")
 			actualChecksum := sha256.Sum256(plaintext)
 			if !checksumEqual(actualChecksum[:], plaintextChecksum) {
 				recv.Fail()
 				return fmt.Errorf("checksum mismatch after decrypt – wrong code or corrupted data")
 			}
+			recv.Status("Saving file…")
 			if err := os.WriteFile(savePath, plaintext, 0644); err != nil {
 				recv.Fail()
 				return fmt.Errorf("write file %s: %w", savePath, err)
@@ -1285,6 +1307,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		}
 
 		// chunked formats 1 and 3
+		waitUI.Status("Reading file metadata…")
 		name, totalPlainLen, nChunks, plaintextChecksum, err := ReadEncryptedBlobChunkedHeader(br)
 		if err != nil {
 			closeRetrain(conn)
@@ -1297,6 +1320,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		}
 		if !headerOK {
 			savePath = resolveDownloadPath(outputPath, name)
+			waitUI.Status(fmt.Sprintf("File info: %s (%s)", name, formatBytes(float64(totalPlainLen))))
 			if handled, err := handleExistingDownload(savePath, plaintextChecksum, unzip); handled || err != nil {
 				closeRetrain(conn)
 				waitUI.Fail()
@@ -1316,6 +1340,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 				return fmt.Errorf("create file %s: %w", savePath, err)
 			}
 			ui = newRecvUI(name, int64(totalPlainLen))
+			ui.Status("Downloading and decrypting chunks…")
 			ui.beginTransfer()
 			numChunks = nChunks
 			totalPlain = int64(totalPlainLen)
@@ -1324,6 +1349,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 		}
 
 		if skipChunks > 0 && !serverSkipped {
+			ui.Status(fmt.Sprintf("Skipping %d already-received chunks…", skipChunks))
 			if err := discardDownloadChunks(br, skipChunks, code, format == 3, secureKey); err != nil {
 				closeRetrain(conn)
 				if isRetrainable(err) {
@@ -1333,6 +1359,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 				ui.Fail()
 				return fmt.Errorf("skip chunks: %w", err)
 			}
+			ui.Status("Resuming download…")
 		}
 
 		stall := false
@@ -1375,7 +1402,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 			hasher.Write(pt)
 			downloaded += int64(len(pt))
 			skipChunks = i + 1
-			ui.Progress("download", downloaded, totalPlain)
+			ui.Progress("Downloading and decrypting chunks…", downloaded, totalPlain)
 		}
 		closeRetrain(conn)
 		if stall {
@@ -1383,6 +1410,7 @@ func runClientGet(code, outputPath string, unzip bool) error {
 			continue
 		}
 		ui.FinishProgress(totalPlain)
+		ui.Status("Verifying SHA-256 checksum…")
 		if !checksumEqual(hasher.Sum(nil), plainSum) {
 			ui.Fail()
 			if format == 3 {
@@ -1509,6 +1537,7 @@ func openDownload(addr, code string, skipChunks uint32) (conn net.Conn, br *bufi
 func finishGet(ui *sendUI, savePath string, unzip bool) error {
 	ui.DoneSaved(savePath)
 	if unzip {
+		ui.Status("Extracting archive…")
 		if err := extractTarGz(savePath); err != nil {
 			return fmt.Errorf("unzip: %w", err)
 		}

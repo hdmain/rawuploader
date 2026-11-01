@@ -35,16 +35,17 @@ func style(enabled bool, code, s string) string {
 
 // sendUI keeps transfer feedback on a single live line (TTY) or sparse lines (pipe).
 type sendUI struct {
-	name     string
-	size     int64
-	arrow    string
-	tty      bool
-	start    time.Time
-	last     time.Time
-	lastDone int64
-	live     bool // true while a \r status line is active
-	barWidth int
-	showBar  bool
+	name      string
+	size      int64
+	arrow     string
+	tty       bool
+	start     time.Time
+	last      time.Time
+	lastDone  int64
+	live      bool // true while a \r status line is active
+	barWidth  int
+	showBar   bool
+	lastPhase string
 }
 
 func newSendUI(name string, size int64) *sendUI {
@@ -101,22 +102,41 @@ func (u *sendUI) beginTransfer() {
 	u.lastDone = 0
 }
 
-// Status shows a short phase on the live line, e.g. "probing", "connecting".
+func (u *sendUI) SetSize(size int64) {
+	u.size = size
+	u.showBar = size >= 256*1024
+}
+
+// Status shows the current phase on the live line (TTY) or as a one-off log line.
 func (u *sendUI) Status(phase string) {
+	u.lastPhase = phase
 	if !u.tty {
+		printSendPhase(phase)
 		return
 	}
-	line := fmt.Sprintf("%s %s  %s  %s",
+	sizePart := ""
+	if u.size > 0 {
+		sizePart = "  " + style(true, ansiDim, formatBytes(float64(u.size)))
+	}
+	line := fmt.Sprintf("%s %s%s  %s",
 		style(true, ansiBlue, u.arrow),
 		style(true, ansiBold, u.name),
-		style(true, ansiDim, formatBytes(float64(u.size))),
+		sizePart,
 		style(true, ansiDim, phase),
 	)
 	u.paint(line)
 }
 
-// Progress updates the live line with a compact bar. label is unused visually (kept for call sites).
-func (u *sendUI) Progress(_ string, done, total int64) {
+// Progress updates the live line with a compact bar and optional phase label.
+func (u *sendUI) Progress(label string, done, total int64) {
+	if label != "" && label != u.lastPhase {
+		u.lastPhase = label
+		if !u.tty {
+			printSendPhase(label)
+		}
+	} else if label != "" {
+		u.lastPhase = label
+	}
 	if !u.showBar {
 		return
 	}
@@ -157,7 +177,12 @@ func (u *sendUI) Progress(_ string, done, total int64) {
 	barBody := strings.Repeat("━", filled) + strings.Repeat("─", u.barWidth-filled)
 	bar := style(u.tty, ansiCyan, barBody)
 
-	line := fmt.Sprintf("%s %s  %s  %s %4.0f%%%s%s",
+	phase := ""
+	if u.lastPhase != "" {
+		phase = "  " + style(u.tty, ansiDim, u.lastPhase)
+	}
+
+	line := fmt.Sprintf("%s %s  %s  %s %4.0f%%%s%s%s",
 		style(u.tty, ansiBlue, u.arrow),
 		style(u.tty, ansiBold, u.name),
 		bar,
@@ -165,6 +190,7 @@ func (u *sendUI) Progress(_ string, done, total int64) {
 		pct,
 		style(u.tty, ansiDim, speedStr),
 		style(u.tty, ansiDim, etaStr),
+		phase,
 	)
 	u.paint(line)
 }

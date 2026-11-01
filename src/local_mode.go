@@ -94,7 +94,7 @@ func serveLocalFile(conn net.Conn, path, name string, size int64) {
 		nameBytes = nameBytes[:65535]
 	}
 	ui := newSendUI(name, size)
-	ui.Status("send")
+	ui.Status("Sending to local peer…")
 	bw := bufio.NewWriter(conn)
 	_ = binary.Write(bw, binary.BigEndian, uint16(len(nameBytes)))
 	_, _ = bw.Write(nameBytes)
@@ -215,6 +215,7 @@ func downloadLocalFile(host string, port int, suggestedName string) error {
 	}
 	defer out.Close()
 	ui := newRecvUI(name, int64(size))
+	ui.Status("Downloading from local peer…")
 	ui.beginTransfer()
 	var downloaded int64
 	buf := make([]byte, 64*1024)
@@ -232,7 +233,7 @@ func downloadLocalFile(host string, port int, suggestedName string) error {
 			}
 			downloaded += int64(n)
 			remaining -= int64(n)
-			ui.Progress("download", downloaded, int64(size))
+			ui.Progress("Downloading from local peer…", downloaded, int64(size))
 		}
 		if readErr != nil {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {

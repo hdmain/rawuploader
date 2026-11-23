@@ -71,6 +71,128 @@ func newParallelGzipWriter(w io.Writer) (*pgzip.Writer, error) {
 	return gz, nil
 }
 
+// estimatePathBytes returns the sum of regular file sizes under path (file or directory).
+func estimatePathBytes(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() {
+		return info.Size(), nil
+	}
+	var total int64
+	err = filepath.Walk(path, func(_ string, fi os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if fi != nil && fi.Mode().IsRegular() {
+			total += fi.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+func dirFreeBytes(dir string) uint64 {
+	free, err := getDiskFreeSpace(dir)
+	if err != nil {
+		return 0
+	}
+	return free
+}
+
+// pickTempDirForPack chooses a writable directory with enough free space for a temp archive.
+// Prefers the filesystem of the source (never inside a directory being packed), then cwd, then system temp.
+func pickTempDirForPack(sourcePath string, sourceIsDir bool, needBytes int64) (string, error) {
+	abs, err := filepath.Abs(sourcePath)
+	if err != nil {
+		abs = sourcePath
+	}
+	var preferred string
+	if sourceIsDir {
+		preferred = filepath.Dir(abs) // parent — avoid writing inside the tree being walked
+	} else {
+		preferred = filepath.Dir(abs)
+	}
+	cwd, _ := os.Getwd()
+	candidates := []string{}
+	add := func(d string) {
+		if d == "" {
+			return
+		}
+		for _, c := range candidates {
+			if c == d {
+				return
+			}
+		}
+		candidates = append(candidates, d)
+	}
+	add(preferred)
+	add(cwd)
+	add(os.TempDir())
+
+	type scored struct {
+		dir  string
+		free uint64
+	}
+	var ok []scored
+	need := uint64(needBytes)
+	if needBytes < 0 {
+		need = 0
+	}
+	// Leave a small cushion for filesystem metadata / gzip overhead edge cases.
+	const cushion = 32 * 1024 * 1024
+	needWithCushion := need + cushion
+	for _, d := range candidates {
+		info, err := os.Stat(d)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		// Never put the temp archive inside the directory being packed.
+		if sourceIsDir {
+			if rel, err := filepath.Rel(abs, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+		}
+		free := dirFreeBytes(d)
+		if need > 0 && free < needWithCushion {
+			continue
+		}
+		ok = append(ok, scored{d, free})
+	}
+	if len(ok) == 0 {
+		var parts []string
+		for _, d := range candidates {
+			parts = append(parts, fmt.Sprintf("%s (%s free)", d, formatBytes(float64(dirFreeBytes(d)))))
+		}
+		return "", fmt.Errorf("not enough free space to pack ~%s (tried: %s)", formatBytes(float64(needBytes)), strings.Join(parts, ", "))
+	}
+	best := ok[0]
+	for _, s := range ok[1:] {
+		if s.free > best.free {
+			best = s
+		}
+	}
+	return best.dir, nil
+}
+
+func createTempArchive(sourcePath string, sourceIsDir bool) (*os.File, error) {
+	need, err := estimatePathBytes(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := pickTempDirForPack(sourcePath, sourceIsDir, need)
+	if err != nil {
+		return nil, err
+	}
+	printSendPhase(fmt.Sprintf("Temp archive on %s (%s free, ~%s source)", dir, formatBytes(float64(dirFreeBytes(dir))), formatBytes(float64(need))))
+	tmp, err := os.CreateTemp(dir, "tcpraw-*.tar.gz")
+	if err != nil {
+		return nil, fmt.Errorf("create temp in %s: %w", dir, err)
+	}
+	return tmp, nil
+}
+
 // prepareSendPath returns the path to send (possibly a temp tar.gz) and an optional cleanup to remove temp file.
 // If path is a directory and zip is false, prompts "Pack directory into tar.gz? [y/N]"; if no, returns error.
 func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func(), err error) {
@@ -88,7 +210,7 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 				return "", nil, fmt.Errorf("cannot send directory (use -z or --zip to pack)")
 			}
 		}
-		tmp, err := os.CreateTemp("", "tcpraw-*.tar.gz")
+		tmp, err := createTempArchive(path, true)
 		if err != nil {
 			return "", nil, fmt.Errorf("create temp: %w", err)
 		}
@@ -101,9 +223,14 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 		}
 		tw := tar.NewWriter(gz)
 		baseDir := filepath.Dir(path)
+		tmpName := tmp.Name()
 		err = filepath.Walk(path, func(fpath string, fi os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
+			}
+			// Skip the temp archive if it somehow lands under the walk root.
+			if fpath == tmpName {
+				return nil
 			}
 			rel, err := filepath.Rel(baseDir, fpath)
 			if err != nil {
@@ -161,7 +288,7 @@ func prepareSendPath(path string, zipFlag bool) (sendPath string, cleanup func()
 	}
 	// single file
 	if zipFlag {
-		tmp, err := os.CreateTemp("", "tcpraw-*.tar.gz")
+		tmp, err := createTempArchive(path, false)
 		if err != nil {
 			return "", nil, fmt.Errorf("create temp: %w", err)
 		}

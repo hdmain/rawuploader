@@ -17,7 +17,7 @@ const (
 )
 
 // Version – change only here; remote check uses GitHub raw version file.
-var Version = "1.4.2"
+var Version = "1.5.1"
 
 var (
 	StorageDuration   = 30 * time.Minute

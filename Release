@@ -1,0 +1,45 @@
+Date: Thu, 26 Nov 2026 14:36:21 +0000
+MD5Sum:
+ 2c64213cc1fa9c9d5a779c95914179dc              470 Packages
+ cb118cce6d1a10211124197aea6216c1              361 Packages.gz
+ d9d43aae296ae8584e2ed3ee227e00d4              436 Packages.xz
+ 3e9e26fda4e101a09bd4d333e46d273f               38 Release
+ d41d8cd98f00b204e9800998ecf8427e                0 Translation-en
+ 1473003d63bad56015abd8678cc450b4               35 Translation-en.gz
+ 8dc5aea5b03dff8595f096f9e368e888               32 Translation-en.xz
+ d41d8cd98f00b204e9800998ecf8427e                0 Translation-en_US
+ c99fb37fe2ff4a5bb2cbb86b9bda777d               38 Translation-en_US.gz
+ 8dc5aea5b03dff8595f096f9e368e888               32 Translation-en_US.xz
+SHA1:
+ 3eb3e0eea3ee50a61e72d5f713be439d7cf9339c              470 Packages
+ 05a75ca9314b38dd97f498492b618d69e4d4e6e0              361 Packages.gz
+ 4133961c039057f7228c357d4d123a2c11472da8              436 Packages.xz
+ acc953ae160bc426306d2d0dec350998322de078               38 Release
+ da39a3ee5e6b4b0d3255bfef95601890afd80709                0 Translation-en
+ e9b4a0b8f51d21fe2e92f63734f690e842d51d63               35 Translation-en.gz
+ 9746882f4236fa1c3a8f86be2f1d9c46680c0b10               32 Translation-en.xz
+ da39a3ee5e6b4b0d3255bfef95601890afd80709                0 Translation-en_US
+ 0c01aca39c73ac7213512cb94d475e623effab8c               38 Translation-en_US.gz
+ 9746882f4236fa1c3a8f86be2f1d9c46680c0b10               32 Translation-en_US.xz
+SHA256:
+ e25567fe1f392ac3e1dec3b934ca520b9908af2b686f374fc8a36be35016f9e2              470 Packages
+ 308e8e7b856c60987db84b4172ba59fd71c53528c358d9f748de411213e2dfd9              361 Packages.gz
+ 90dafe8c413dafa7b42ceca398cdfdb948284a57ad11d714572500e08f46f81b              436 Packages.xz
+ 66c13e79e3dddbdee984bea1ece52853e34ee2a668d650dc626a438f7a304806               38 Release
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855                0 Translation-en
+ 94436e678779f3b2f2803b4fdec1a630234ee989a144c1f38c5b31862013fc42               35 Translation-en.gz
+ 0040f94d11d0039505328a90b2ff48968db873e9e7967307631bf40ef5679275               32 Translation-en.xz
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855                0 Translation-en_US
+ 69b97c963eb8f3f0be26469b62dc50de084c9bf159b0605e1e5b32a7654bc8ad               38 Translation-en_US.gz
+ 0040f94d11d0039505328a90b2ff48968db873e9e7967307631bf40ef5679275               32 Translation-en_US.xz
+SHA512:
+ 4f2fcd54153f69be35c77e65f708a6b414e8a39ab4bf28ee49e2c94b3eb5fc58b5c0facf4ebeb29726013f478241526eb3583ce3af9a9d206808596bb2d94f33              470 Packages
+ 61313545c8da2cd0fdbdbf15a9e56c4ab1dfa3f504a934b79baf7773d69c2be20d0b2b74a095d32c747e5c8010193b6c491e572a4f0915668c94f7ed18712b41              361 Packages.gz
+ 263356da086857d9ac0fea32da99ba040dd29a39a68ef601ca3945f0e9cf08186fef7b8b9fa89f6eda39bfca22debecf3b1e47034b1fea34a02f2ea739d49721              436 Packages.xz
+ bf5e418c60f407f959cd0d49f2deff9a8f31f445290b2405d9302810cd48f5bf23c793a29a57271a03b218dfb3f1dee88211c1cd35f1e0be83013b358f7a22e3               38 Release
+ cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e                0 Translation-en
+ 327fdf5a5618d95d47ba389bcf45eba2d66e1c9d9a776473828e0ae9bb3f5055748b23913be5ca314959054d6140b49291d7fad3310837412b94c05300a344b2               35 Translation-en.gz
+ 034b32f1138322638c7a5b7949a3b184c6a4cdfd003360a496c08c56c2cc645c94fbe9cdf9d84c963af6dda6c442717cd61d7e1cecf7024bd463f6f5196c5527               32 Translation-en.xz
+ cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e                0 Translation-en_US
+ 7d8cd8990b96b1fe33bef2658c019eb842afe5ab93bd6550f0cffad03c316c79d9d405c4a2e089023c8343c7bedb5217e21fe1c21a7ce240e1303f28ad05412a               38 Translation-en_US.gz
+ 034b32f1138322638c7a5b7949a3b184c6a4cdfd003360a496c08c56c2cc645c94fbe9cdf9d84c963af6dda6c442717cd61d7e1cecf7024bd463f6f5196c5527               32 Translation-en_US.xz

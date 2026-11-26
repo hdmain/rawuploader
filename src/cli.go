@@ -147,7 +147,7 @@ var commonLongFlags = map[string]string{
 
 func printGlobalUsage() {
 	name := progName()
-	fmt.Printf("%s – UDP file send/receive; client generates 6-digit code, data encrypted on server\n", name)
+	fmt.Printf("%s – TCP file send/receive; client generates 6-digit code, data encrypted on server\n", name)
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  server       listen for uploads; store encrypted data")
@@ -177,7 +177,7 @@ func printServerUsage() {
 	fmt.Printf("Usage: %s server [options]\n\n", name)
 	fmt.Println("Options:")
 	fmt.Println("  -i, --id=N         server id 0–9 (first digit of generated codes); default 0")
-	fmt.Println("  -p, --port=PORT    UDP listen port (default 9999)")
+	fmt.Println("  -p, --port=PORT    TCP listen port (default 9999)")
 	fmt.Println("  -d, --dir=PATH     directory for stored encrypted blobs (default ./data)")
 	fmt.Println("  -w, --web=PORT     HTTP port for browser download page; empty = disabled")
 	fmt.Println("  -m, --maxsize=MB   max upload size in MB (0 = default from code)")

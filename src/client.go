@@ -482,7 +482,7 @@ type probeResult struct {
 
 func probeServer(addr string, serverID int, fileSize uint64) (speedBps float64, rtt time.Duration, ok bool) {
 	start := time.Now()
-	conn, err := DialUDPStream(addr, probeDialTimeout)
+	conn, err := net.DialTimeout("tcp", addr, probeDialTimeout)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -651,7 +651,7 @@ func (c *countWriter) Write(p []byte) (n int, err error) {
 
 func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, free uint64, downloadBps, uploadBps float64, err error) {
 	pingStart := time.Now()
-	conn, err := DialUDPStream(addr, dialTimeout)
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
@@ -752,7 +752,7 @@ func runServerBench(addr string, id int, durationSec uint16) (pingMs float64, fr
 
 // getServerFreeSpace returns free disk space (bytes) for one server, or 0 on failure.
 func getServerFreeSpace(addr string) uint64 {
-	conn, err := DialUDPStream(addr, 2*time.Second)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return 0
 	}

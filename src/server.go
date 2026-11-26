@@ -294,13 +294,13 @@ func runServer(serverIDFromFlag int, port, dataDir, webPort string, maxBlobSize 
 		fmt.Printf("tcpraw server: web download page on :%s (open in browser, enter code to download)\n", webPort)
 	}
 
-	ln, err := ListenUDPStream("udp", ":"+port)
+	ln, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
 	defer ln.Close()
 
-	fmt.Printf("tcpraw server: id=%d, listening UDP on :%s, data dir %s, blobs kept %v, max %d MB, rate limit %d/%v then %v ban\n",
+	fmt.Printf("tcpraw server: id=%d, listening on :%s, data dir %s, blobs kept %v, max %d MB, rate limit %d/%v then %v ban\n",
 		serverID, port, dataDir, StorageDuration, serverMaxBlobSize/(1024*1024), RateLimitAttempts, RateLimitWindow, BanDuration)
 
 	for {

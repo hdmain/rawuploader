@@ -14,7 +14,7 @@ func isStall(err error) bool {
 }
 
 func isRetrainable(err error) bool {
-	if isStall(err) || errors.Is(err, errPacketLoss) {
+	if isStall(err) {
 		return true
 	}
 	var ne net.Error
@@ -172,7 +172,7 @@ func wrapWatched(conn net.Conn, total int64) (*watchedConn, *speedWatch) {
 }
 
 func dialTuned(addr string) (net.Conn, error) {
-	conn, err := DialUDPStream(addr, dialTimeout)
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -181,15 +181,15 @@ func dialTuned(addr string) (net.Conn, error) {
 }
 
 func setTCPOptions(conn net.Conn) {
-	if tc, ok := conn.(*net.TCPConn); ok {
-		_ = tc.SetReadBuffer(tcpBufferSize)
-		_ = tc.SetWriteBuffer(tcpBufferSize)
-		_ = tc.SetNoDelay(true)
-		_ = tc.SetKeepAlive(true)
-		_ = tc.SetKeepAlivePeriod(30 * time.Second)
+	tc, ok := conn.(*net.TCPConn)
+	if !ok {
 		return
 	}
-	// UDP stream: best-effort socket buffer hints via underlying packet conn are internal.
+	_ = tc.SetReadBuffer(tcpBufferSize)
+	_ = tc.SetWriteBuffer(tcpBufferSize)
+	_ = tc.SetNoDelay(true)
+	_ = tc.SetKeepAlive(true)
+	_ = tc.SetKeepAlivePeriod(30 * time.Second)
 }
 
 func closeRetrain(conn net.Conn) {

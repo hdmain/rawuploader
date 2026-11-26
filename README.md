@@ -2,7 +2,7 @@
 
 ## 🇵🇱Polski
 
-Przesyłanie plików przez TCP z 6-cyfrowymi kodami. Kod generuje klient i szyfruje plik; serwer przechowuje dane w postaci zaszyfrowanej. Bez rejestracji.
+Przesyłanie plików przez UDP z 6-cyfrowymi kodami. Kod generuje klient i szyfruje plik; serwer przechowuje dane w postaci zaszyfrowanej. Bez rejestracji.
 
 ### Funkcje
 
@@ -85,7 +85,7 @@ Każda opcja ma formę krótką (`-x`) i długą (`--nazwa`). Każda komenda obs
 | Komenda              | Argument / opcja  | Opis                                                           |
 | -------------------- | ----------------- | -------------------------------------------------------------- |
 | `tcpraw server`      | `-i` / `--id`        | Id serwera (pierwsza cyfra generowanych kodów); domyślnie 0.   |
-| `tcpraw server`      | `-p` / `--port`      | Port TCP (domyślnie 9999).                                     |
+| `tcpraw server`      | `-p` / `--port`      | Port UDP (domyślnie 9999).                                     |
 | `tcpraw server`      | `-d` / `--dir`       | Katalog na bloby (domyślnie `./data`).                         |
 | `tcpraw server`      | `-w` / `--web`       | Port HTTP strony pobierania w przeglądarce; pomiń = wyłączone. |
 | `tcpraw server`      | `-m` / `--maxsize`   | Osobny limit max rozmiaru uploadu dla tego serwera w MB (0 = domyślna z kodu). |
@@ -124,7 +124,7 @@ tcpraw server --port 9999 --dir ./data --web 8080
 Następnie otwórz `http://SERVER:8080` i wpisz 6-cyfrowy kod, żeby pobrać plik.
 
 - **-i / --id** – Id serwera 0–9 (pierwsza cyfra generowanych kodów); domyślnie 0.
-- **-p / --port** – Port TCP protokołu tcpraw (domyślnie 9999).
+- **-p / --port** – Port UDP protokołu tcpraw (domyślnie 9999).
 - **-d / --dir** – Katalog na zaszyfrowane bloby (domyślnie `./data`).
 - **-w / --web** – Port HTTP strony pobierania; pomiń, żeby wyłączyć.
 - **-m / --maxsize** – Osobny limit max rozmiaru uploadu dla tego serwera w MB (0 = domyślna z kodu). Każda instancja serwera może mieć inny limit.
@@ -178,7 +178,7 @@ Możesz używać i modyfikować dowolnie.
 
 ## 🇺🇸English
 
-TCP file send/receive with 6-digit codes. The client generates the code and encrypts the file; the server stores data encrypted. No account needed.
+UDP file send/receive with 6-digit codes. The client generates the code and encrypts the file; the server stores data encrypted. No account needed.
 
 ### Features
 
@@ -260,7 +260,7 @@ Every option has a short form (`-x`) and a long form (`--name`). Every command s
 | Command              | Argument / option | Description                                            |
 | -------------------- | ----------------- | ------------------------------------------------------ |
 | `tcpraw server`      | `-i` / `--id`        | Server id (first digit of generated codes); default 0. |
-| `tcpraw server`      | `-p` / `--port`      | TCP port (default 9999).                               |
+| `tcpraw server`      | `-p` / `--port`      | UDP port (default 9999).                               |
 | `tcpraw server`      | `-d` / `--dir`       | Directory for blobs (default `./data`).                |
 | `tcpraw server`      | `-w` / `--web`       | HTTP port for browser download page; omit = disabled.  |
 | `tcpraw server`      | `-m` / `--maxsize`   | Per-server max upload size in MB (0 = default from code). Each instance can have a different limit. |
@@ -299,7 +299,7 @@ tcpraw server --port 9999 --dir ./data --web 8080
 Then open `http://SERVER:8080` and enter the 6-digit code to download.
 
 - **-i / --id** – Server id 0–9 (first digit of generated codes); default 0.
-- **-p / --port** – TCP port for the tcpraw protocol (default 9999).
+- **-p / --port** – UDP port for the tcpraw protocol (default 9999).
 - **-d / --dir** – Directory for stored encrypted blobs (default `./data`).
 - **-w / --web** – HTTP port for the download page; omit to disable.
 - **-m / --maxsize** – Per-server max upload size in MB (0 = default from code). Each server instance can have a different limit.

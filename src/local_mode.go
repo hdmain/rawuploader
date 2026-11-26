@@ -15,7 +15,7 @@ import (
 
 const (
 	localDiscoveryPort = 40555
-	localDefaultTCP    = 40556
+	localDefaultUDP    = 40556
 )
 
 func runLocalSender(filePath string) error {
@@ -49,15 +49,21 @@ func runLocalSender(filePath string) error {
 	peers, _ := scanLocalPeers(1500 * time.Millisecond)
 	fmt.Printf("Active clients: %v\n", peers)
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", localDefaultTCP))
+	ln, err := ListenUDPStream("udp", fmt.Sprintf(":%d", localDefaultUDP))
 	if err != nil {
-		ln, err = net.Listen("tcp", ":0")
+		ln, err = ListenUDPStream("udp", ":0")
 		if err != nil {
 			return err
 		}
 	}
 	defer ln.Close()
-	port := ln.Addr().(*net.TCPAddr).Port
+	port := 0
+	if ua, ok := ln.Addr().(*net.UDPAddr); ok {
+		port = ua.Port
+	} else {
+		_, ps, _ := net.SplitHostPort(ln.Addr().String())
+		port = mustAtoi(ps)
+	}
 	size := info.Size()
 	fmt.Printf("Sharing file: %s (%s)\n", displayName, formatBytes(float64(size)))
 
@@ -67,17 +73,34 @@ func runLocalSender(filePath string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	deadline := time.Now().Add(2 * time.Minute)
-	_ = ln.(*net.TCPListener).SetDeadline(deadline)
 	printSendPhase("Waiting for local downloads...")
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				break
-			}
-			return err
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
 		}
-		go serveLocalFile(conn, sendPath, displayName, size)
+		type acc struct {
+			c   net.Conn
+			err error
+		}
+		ch := make(chan acc, 1)
+		go func() {
+			c, err := ln.Accept()
+			ch <- acc{c, err}
+		}()
+		select {
+		case <-time.After(remaining):
+			_ = ln.Close()
+			return nil
+		case r := <-ch:
+			if r.err != nil {
+				if time.Now().After(deadline) {
+					return nil
+				}
+				return r.err
+			}
+			go serveLocalFile(r.c, sendPath, displayName, size)
+		}
 	}
 	return nil
 }
@@ -186,7 +209,7 @@ func runLocalReceiver() error {
 }
 
 func downloadLocalFile(host string, port int, suggestedName string) error {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 5*time.Second)
+	conn, err := DialUDPStream(fmt.Sprintf("%s:%d", host, port), 5*time.Second)
 	if err != nil {
 		return err
 	}
